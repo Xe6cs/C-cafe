@@ -1,0 +1,295 @@
+{
+  "contact": {
+    "name": "C Cafe | سي كافيه",
+    "phoneDisplay": "0771 667 3643",
+    "phoneIntl": "+9647716673643",
+    "address": "بغداد، السيدية، مقابل نخيل بغداد",
+    "street": "السيدية، مقابل نخيل بغداد",
+    "city": "بغداد",
+    "mapsUrl": "https://maps.app.goo.gl/E1wPKyroQCR7h1hZ7",
+    "instagramUrl": "https://www.instagram.com/c.cafe.iq/",
+    "instagramHandle": "@c.cafe.iq",
+    "lat": "33.2614125",
+    "lng": "44.3624531"
+  },
+  "seo": {
+    "title": "سي كافيه | C Cafe — كل الي يحتاجه مزاجك موجود بـ سي",
+    "description": "سي كافيه في السيدية، مقابل نخيل بغداد: قهوة وشاي، بليارد، مباريات على أكبر شاشة بالسيدية، وخصم 20% لطلاب الجامعات. للحجز والاستفسار: 0771 667 3643.",
+    "siteUrl": "",
+    "ogImage": "assets/brand/og.jpg",
+    "favicon": "assets/brand/favicon.svg",
+    "touchIcon": "assets/brand/apple-touch-icon.png"
+  },
+  "brand": {
+    "logo": "assets/brand/logo.svg",
+    "logoLabel": "سي كافيه"
+  },
+  "header": {
+    "nav": [
+      {
+        "label": "الأمزجة",
+        "href": "#moods"
+      },
+      {
+        "label": "الأجواء",
+        "href": "#vibes"
+      },
+      {
+        "label": "المنيو",
+        "href": "#menu"
+      },
+      {
+        "label": "وين سي؟",
+        "href": "#visit"
+      }
+    ],
+    "showCall": true,
+    "callIcon": "phone"
+  },
+  "hero": {
+    "mark": "assets/brand/mark.svg",
+    "where": "بغداد · السيدية · مقابل نخيل بغداد",
+    "line1": "كل الي يحتاجه",
+    "big": "مزاجك",
+    "line3": "موجود بـ سي",
+    "lead": "قهوة وشاي، بليارد ومباريات، وكعدة تحلى ويا الربع.",
+    "primary": {
+      "label": "شنو مزاجك اليوم؟",
+      "href": "#moods",
+      "icon": "arrow"
+    },
+    "secondary": {
+      "label": "وين سي؟",
+      "href": "#visit",
+      "icon": ""
+    },
+    "facts": [
+      {
+        "strong": "4.8 ★",
+        "text": "على خرائط Google"
+      },
+      {
+        "strong": "أكبر شاشة",
+        "text": "بالسيدية"
+      },
+      {
+        "strong": "خصم 20%",
+        "text": "لطلاب الجامعات"
+      }
+    ]
+  },
+  "moods": {
+    "kicker": "Beyond the Ordinary",
+    "title": "شنو مزاجك اليوم؟",
+    "items": [
+      {
+        "tab": "قهوة",
+        "title": "مزاج قهوة",
+        "text": "للمذاق عنوان، وللأناقة تفاصيل. قهوة مرتبة تبدي بيها يومك، أو تكمّل بيها كعدتك.",
+        "note": "",
+        "image": "assets/photos/coffee.webp",
+        "alt": "كوب قهوة مثلجة بالحليب على طاولة بليارد زرقاء"
+      },
+      {
+        "tab": "شاي",
+        "title": "مزاج شاي",
+        "text": "استكان شاي يضبط المزاج، وكعدة تحلى بتفاصيلها.",
+        "note": "",
+        "image": "assets/photos/tea.webp",
+        "alt": "استكان شاي عراقي فوق صحن زجاجي على طاولة"
+      },
+      {
+        "tab": "لعب",
+        "title": "مزاج لعب",
+        "text": "مو كل طلعة لازم تكون قهوة. مرات لعبة بليارد تغيّر جو يومك كله.",
+        "note": "بليارد · ألعاب فيديو · دومينو · طاولي",
+        "image": "assets/photos/billiards.webp",
+        "alt": "لاعب يصوّب على طاولة بليارد زرقاء قرب نافذة كبيرة"
+      },
+      {
+        "tab": "مباراة",
+        "title": "مزاج مباراة",
+        "text": "عيش جو الملعب على أكبر شاشة بالسيدية. جيب الربع وتعال قبل صافرة البداية.",
+        "note": "",
+        "image": "assets/photos/stadium.webp",
+        "alt": "شاشة عملاقة تعرض مباراة كرة قدم فوق جلسات سي كافيه الخارجية، مع عبارة عيش جو الملعب"
+      },
+      {
+        "tab": "دراسة",
+        "title": "مزاج دراسة",
+        "text": "دراستك تحتاج تركيز، وإحنا نوفرلك الأجواء. وطلاب الجامعات إلهم خصم 20% من 9 الصبح لـ 5 العصر.",
+        "note": "",
+        "image": "assets/photos/students.webp",
+        "alt": "ثلاثة طلاب يدرسون على حواسيبهم في جلسة خارجية، مع إعلان خصم 20% لطلاب الجامعات"
+      },
+      {
+        "tab": "كعدة",
+        "title": "مزاج كعدة",
+        "text": "شيشة وشاشة وكعدة تحلى ويا الربع. تحدّي، حماس، وضحك ما يخلص.",
+        "note": "",
+        "image": "assets/photos/games.webp",
+        "alt": "شاب يلعب مباراة كرة قدم إلكترونية أمام شاشة كبيرة وبجانبه شيشة"
+      }
+    ],
+    "visible": true
+  },
+  "vibes": {
+    "kicker": "Café & More",
+    "title": "أجواء سي كافيه",
+    "lead": "جلسات داخلية وخارجية، إضاءة دافية، وتفاصيل معمولة بمزاج.",
+    "tiles": [
+      {
+        "image": "assets/photos/exterior.webp",
+        "caption": "الواجهة بالليل",
+        "alt": "واجهة سي كافيه ليلًا بإضاءة برتقالية ولافتة Café & More",
+        "tall": true
+      },
+      {
+        "image": "assets/photos/rooftop.webp",
+        "caption": "الجلسات الخارجية",
+        "alt": "جلسات خارجية على عشب صناعي تحت سماء الليل مع قطع دومينو وأوراق لعب",
+        "tall": false
+      },
+      {
+        "image": "assets/photos/drink.webp",
+        "caption": "مشروب بارد وجولة بليارد",
+        "alt": "مشروب أحمر مثلج بجانب طاولة بليارد ولاعب في الخلفية",
+        "tall": false
+      }
+    ],
+    "insta": {
+      "visible": true,
+      "text": "تابعوا أجواءنا كل يوم",
+      "handle": "",
+      "href": "@instagram",
+      "icon": "instagram"
+    },
+    "visible": true
+  },
+  "offer": {
+    "number": "20",
+    "symbol": "%",
+    "kicker": "لطلاب الجامعات",
+    "title1": "خصم 20%",
+    "title2": "من 9 الصبح لـ 5 العصر",
+    "text": "جيب لابتوبك وربعك. الأجواء جاهزة، والخصم ينتظرك.",
+    "cta": {
+      "label": "احجز طاولتك",
+      "href": "@phone",
+      "icon": "phone"
+    },
+    "visible": true
+  },
+  "menu": {
+    "kicker": "Menu",
+    "title": "شنو تطلب؟",
+    "lead": "الأصناف والأسعار كاملة بالمنيو على إنستغرام، وتلكونا هم على Toters.",
+    "primary": {
+      "label": "شوف المنيو",
+      "href": "https://www.instagram.com/stories/highlights/17988649838592588/",
+      "icon": "arrow"
+    },
+    "secondary": {
+      "label": "سي على Toters",
+      "href": "https://www.instagram.com/stories/highlights/18501074779014313/",
+      "icon": ""
+    },
+    "categories": [
+      {
+        "name": "قهوة",
+        "note": "حارة وباردة",
+        "items": []
+      },
+      {
+        "name": "شاي",
+        "note": "بالاستكان",
+        "items": []
+      },
+      {
+        "name": "عصائر ومشروبات",
+        "note": "منعشة ومثلجة",
+        "items": []
+      },
+      {
+        "name": "مأكولات",
+        "note": "ويا الكعدة",
+        "items": []
+      },
+      {
+        "name": "شيشة",
+        "note": "للجو الرايق",
+        "items": []
+      }
+    ],
+    "visible": true
+  },
+  "visit": {
+    "kicker": "وين سي؟",
+    "title": "شوكت تزورونا؟",
+    "facts": [
+      {
+        "label": "العنوان",
+        "value": "",
+        "href": "@maps"
+      },
+      {
+        "label": "للحجز والاستفسار",
+        "value": "",
+        "href": "@phone"
+      },
+      {
+        "label": "إنستغرام",
+        "value": "",
+        "href": "@instagram"
+      }
+    ],
+    "primary": {
+      "label": "افتح الاتجاهات",
+      "href": "@maps",
+      "icon": "pin"
+    },
+    "secondary": {
+      "label": "اتصل هسه",
+      "href": "@phone",
+      "icon": "phone"
+    },
+    "mapVisible": true,
+    "visible": true
+  },
+  "footer": {
+    "tagline": "كل الي يحتاجه مزاجك موجود بـ سي",
+    "small": "© 2026 C Cafe | سي كافيه · بغداد، السيدية"
+  },
+  "quickbar": {
+    "visible": true,
+    "items": [
+      {
+        "label": "اتصل",
+        "href": "@phone",
+        "icon": "phone"
+      },
+      {
+        "label": "الاتجاهات",
+        "href": "@maps",
+        "icon": "pin"
+      },
+      {
+        "label": "المنيو",
+        "href": "#menu",
+        "icon": "list"
+      }
+    ]
+  },
+  "layout": {
+    "order": [
+      "moods",
+      "vibes",
+      "offer",
+      "menu",
+      "visit"
+    ]
+  },
+  "settings": {
+    "tracking": true
+  }
+}

@@ -1,0 +1,14 @@
+# Secrets and runtime data (generated automatically on first run)
+data/config.json
+data/events/
+data/trash/
+data/draft.json
+
+# User uploads and dependencies
+assets/uploads/
+node_modules/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>لوحة تحكم سي كافيه</title>
+  <link rel="icon" href="../assets/brand/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Alexandria:wght@300..800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="admin.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="side">
+      <a class="side-logo" href="#/stats" aria-label="لوحة تحكم سي كافيه"><img src="../assets/brand/logo.svg" alt="" width="118" height="50"></a>
+      <nav class="side-nav" id="side-nav" aria-label="أقسام لوحة التحكم"></nav>
+      <a class="side-site" href="/" target="_blank" rel="noopener">فتح الموقع</a>
+    </aside>
+
+    <div class="main">
+      <header class="topbar">
+        <h1 id="page-title">لوحة التحكم</h1>
+        <div class="publish-box" id="publish-box">
+          <span class="draft-state" id="draft-state" role="status"></span>
+          <button class="btn btn-ghost" id="discard" type="button">تجاهل</button>
+          <button class="btn btn-primary" id="publish" type="button">نشر التعديلات</button>
+        </div>
+      </header>
+      <main id="view" tabindex="-1"></main>
+    </div>
+  </div>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
