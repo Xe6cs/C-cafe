@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>لوحة تحكم سي كافيه — المحتوى</title>
+  <link rel="icon" href="/assets/brand/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Alexandria:wght@300..800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/admin/admin.css">
+  <link rel="stylesheet" href="/admin/readonly.css">
+  <link rel="stylesheet" href="/admin/editor.css">
+</head>
+<body>
+  <noscript>
+    <div class="gate">
+      <div class="card gate-card">
+        <h1>لوحة تحكم سي كافيه</h1>
+        <p class="notice notice-warn">تحتاج إلى تفعيل JavaScript لتحرير المسودة.</p>
+      </div>
+    </div>
+  </noscript>
+
+  <section class="gate" id="login-view" hidden aria-labelledby="login-title">
+    <form class="card gate-card" id="login-form" novalidate>
+      <img src="/assets/brand/logo.svg" alt="سي كافيه" width="132" height="56">
+      <div class="gate-head">
+        <h1 id="login-title">لوحة تحكم سي كافيه</h1>
+        <p class="muted">الدخول مخصص للمديرين فقط</p>
+      </div>
+
+      <div class="notice">
+        يمكنك تعديل النصوص والروابط والإعدادات وترتيب الأقسام، ثم حفظ المسودة ومعاينتها.
+        <strong>النشر والاستعادة متاحان للمدير فقط</strong>، وكل عملية تنشئ إصدارًا جديدًا.
+        مكتبة الوسائط تتيح عرض الأصول الأصلية واختيارها ورفع صور خاصة معتمدة، وتُجهَّز الصور المعتمدة للنشر تلقائيًا عبر نسخة عامة، وتُعرض التحليلات التجريبية للمدير في صفحة نشاط الزوار.
+      </div>
+
+      <div class="field">
+        <label class="field-label" for="login-email">البريد الإلكتروني</label>
+        <input class="input" id="login-email" name="email" type="email" inputmode="email" autocomplete="username" spellcheck="false" dir="ltr" required>
+      </div>
+
+      <div class="field">
+        <label class="field-label" for="login-password">كلمة المرور</label>
+        <input class="input" id="login-password" name="password" type="password" autocomplete="current-password" dir="ltr" required>
+      </div>
+
+      <p class="field-warn" id="login-error" role="alert" hidden></p>
+
+      <button class="btn btn-primary" id="login-submit" type="submit">تسجيل الدخول</button>
+      <p class="auth-note">التسجيل العام مغلق، ولا توجد روابط دخول سريعة أو دخول تلقائي من localhost.</p>
+    </form>
+  </section>
+
+  <div class="app" id="app-view" hidden>
+    <aside class="side">
+      <a class="side-logo" href="/admin/" aria-label="لوحة تحكم سي كافيه">
+        <img src="/assets/brand/logo.svg" alt="" width="118" height="50">
+      </a>
+
+      <nav class="side-nav" aria-label="أقسام لوحة التحكم">
+        <span class="nav-heading">التحرير</span>
+        <a href="#editor" data-nav="editor" class="is-active">
+          <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18"/><path d="M3 12h18"/><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
+          <span>كل المحتوى</span>
+        </a>
+        <a href="#texts" data-nav="texts">
+          <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7V5h16v2"/><path d="M12 5v15"/><path d="M8 20h8"/></svg>
+          <span>النصوص</span>
+        </a>
+        <a href="#links" data-nav="links">
+          <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+          <span>الروابط</span>
+        </a>
+        <a href="#sections" data-nav="sections">
+          <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/></svg>
+          <span>ترتيب الأقسام</span>
+        </a>
+        <a href="#media" data-nav="media">
+          <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+          <span>مكتبة الوسائط</span>
+        </a>
+
+        <span class="nav-heading">المراجعة</span>
+        <a href="#preview" data-nav="preview">
+          <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          <span>معاينة المسودة</span>
+        </a>
+        <a href="#published" data-nav="published">
+          <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+          <span>المحتوى المنشور</span>
+        </a>
+        <a href="#history" data-nav="history">
+          <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+          <span>سجل النسخ</span>
+        </a>
+        <a href="#stats" data-nav="stats">
+          <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 15l4-4 3 3 5-6"/></svg>
+          <span>نشاط الزوار</span>
+        </a>
+
+        <span class="nav-heading">الحساب</span>
+        <a href="#logout" data-action="logout">
+          <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/></svg>
+          <span>تسجيل الخروج</span>
+        </a>
+      </nav>
+
+      <a class="side-site" href="/" target="_blank" rel="noopener">فتح الموقع</a>
+      <p class="side-user" id="side-user" dir="auto"></p>
+    </aside>
+
+    <div class="main">
+      <header class="topbar">
+        <h1 id="page-title">كل المحتوى</h1>
+        <div class="publish-box">
+          <span class="badge status-pill status-saved" id="status-pill" role="status">محفوظ</span>
+          <span class="session-note" id="session-note" role="status"></span>
+          <button class="btn btn-ghost btn-small" id="refresh" type="button">تحديث</button>
+          <button class="btn btn-ghost btn-small" id="preview-btn" type="button">معاينة</button>
+          <button class="btn btn-ghost btn-small" id="save-btn" type="button">حفظ</button>
+          <button class="btn btn-primary btn-small" id="publish-btn" type="button">نشر المسودة</button>
+          <button class="btn btn-danger-ghost btn-small" id="delete-btn" type="button">حذف المسودة</button>
+          <button class="btn btn-ghost btn-small" id="logout" type="button">تسجيل الخروج</button>
+        </div>
+      </header>
+      <div id="status-banner"></div>
+      <main id="view" tabindex="-1"></main>
+    </div>
+  </div>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
+  <script src="/admin/config.js"></script>
+  <script src="/admin/vendor/supabase.js"></script>
+  <script src="/admin/editor.js"></script>
+  <script src="/admin/stats.js"></script>
+  <script src="/admin/app.js"></script>
+</body>
+</html>

@@ -8,6 +8,22 @@ data/draft.json
 assets/uploads/
 node_modules/
 
+# Environment files (the non-sensitive example stays tracked)
+.env
+.env.*
+!.env.example
+
+# Local build output and tooling state
+.netlify/
+dist/
+netlify/admin/vendor/
+supabase/.temp/
+
+# Logs and local backups
+*.log
+*.bak
+data/backups/
+
 # OS / editor noise
 .DS_Store
 Thumbs.db

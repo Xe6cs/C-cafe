@@ -6,9 +6,25 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test"
+    "test": "node --test",
+    "test:db": "node --test supabase/tests/db-check.mjs",
+    "test:db:real": "node --test supabase/tests/pg-real-check.mjs",
+    "test:db:media": "node --test supabase/tests/media-concurrency-check.mjs",
+    "verify:supabase": "node supabase/tests/verify-cloud.mjs",
+    "build": "node scripts/copy-admin-vendor.mjs && node scripts/build-site.mjs",
+    "snapshot:content": "node scripts/snapshot-content.mjs",
+    "preview:site": "node scripts/serve-site.mjs",
+    "check:preview": "node scripts/check-preview.mjs"
   },
   "engines": {
     "node": ">=18"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.15",
+    "@supabase/supabase-js": "2.119.0",
+    "pg": "8.23.1"
+  },
+  "dependencies": {
+    "sharp": "^0.35.5"
   }
 }

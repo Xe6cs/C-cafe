@@ -1,8 +1,8 @@
-/* تتبع نشاط الزوار: بلا كوكيز وبلا بيانات شخصية. يتوقف تلقائيًا في المعاينة وعند فتح الملف محليًا. */
+/* تتبع نشاط الزوار: بلا كوكيز وبلا بيانات شخصية. لا تُضمَّن هذه السكربت في المعاينة الإدارية أو عند فتح الملف محليًا. */
 (function () {
   'use strict';
 
-  if (location.protocol === 'file:' || window.CCAFE_PREVIEW) return;
+  if (location.protocol === 'file:') return;
   try {
     if (localStorage.getItem('ccafe-notrack') === '1') return;
   } catch (e) { /* التخزين غير متاح: يستمر التتبع */ }
@@ -25,9 +25,9 @@
   function send(data) {
     data.s = sid;
     var body = JSON.stringify(data);
-    if (navigator.sendBeacon && navigator.sendBeacon('api/track', new Blob([body], { type: 'text/plain' }))) return;
+    if (navigator.sendBeacon && navigator.sendBeacon('/api/track', new Blob([body], { type: 'text/plain' }))) return;
     if (window.fetch) {
-      fetch('api/track', { method: 'POST', body: body, keepalive: true, headers: { 'Content-Type': 'text/plain' } }).catch(function () {});
+      fetch('/api/track', { method: 'POST', body: body, keepalive: true, headers: { 'Content-Type': 'text/plain' } }).catch(function () {});
     }
   }
 
