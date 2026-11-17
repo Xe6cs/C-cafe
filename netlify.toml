@@ -13,7 +13,8 @@
   functions = "netlify/functions"
 
 [build.environment]
-  NODE_VERSION = "20"
+  # Netlify default runtime is Node 24; sharp 0.35.5 loads correctly on it.
+  NODE_VERSION = "24"
 
 [functions]
   # The site Function requires these shared files at runtime. Listing them

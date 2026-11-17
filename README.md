@@ -1,17 +1,27 @@
 # موقع سي كافيه ولوحة التحكم
 
+## الوضع النهائي (الإنتاج)
+
+- الرابط الرسمي: `https://c-cafe-preview.netlify.app` (HTTPS، بلا دومين مخصص وبلا ترقية مدفوعة).
+- المستودع `Xe6cs/C-cafe`، الفرع `main`، والنشر من commit معروف بـ`npm run build` ونشر `dist` والدوال `netlify/functions`.
+- Node.js: 24 على Netlify (`netlify.toml`) و20.9.0 أو أحدث محليًا. يلزم `npm ci` قبل البناء لأن `sharp` مطلوب لإعلان الوسائط.
+- المحتوى المنشور: الإصدار `259` وبصمة `e4a10787ac32b6b30721c7984b219008`، محفوظ بالكامل في النسخة الاحتياطية.
+- لوحة التحكم: حساب مدير واحد في Supabase Auth ومنحة واحدة في `public.admin_users`؛ التسجيل العام مغلق. البريد وكلمة المرور لا يُخزَّنان في المستودع أو التوثيق، ومالك المشروع يديرهما.
+- التحليلات: `CCAFE_ANALYTICS_ENV=production` في الإنتاج و`preview` في المعاينات، ببيانات معزولة؛ `CCAFE_PREVIEW_ONLY` مُزال من الإنتاج، و`CCAFE_VERIFY_ORIGIN=https://c-cafe-preview.netlify.app`.
+- كاش المحتوى الديناميكي مطفأ، ومهمة `analytics_purge_expired(90)` مفعّلة.
+
 ## التشغيل على جهازك
 
 افتح `start.bat` بنقرة مزدوجة، فتفتح لوحة التحكم تلقائيًا. أو من الطرفية:
 
 ```bash
+npm ci           # مطلوب عند البناء أو تشغيل دوال Netlify محليًا
 node server.js
 ```
 
 - الموقع: `http://localhost:3000/`
 - لوحة التحكم: `http://localhost:3000/admin/`
-
-لا يحتاج المشروع إلى `npm install`، يكفي Node.js الإصدار 18 أو أحدث.
+- يكفي Node.js 20.9.0 أو أحدث للتشغيل المحلي؛ الإنتاج يبني بـNode.js 24.
 
 ## كيف يعمل
 
@@ -21,17 +31,16 @@ node server.js
 
 ## الوصول إلى لوحة التحكم
 
-لا توجد كلمة مرور:
+هناك وضعان:
 
-- من الجهاز الذي يشغّل الخادم تفتح اللوحة مباشرة.
-- من أي جهاز آخر افتح الرابط السري من «الإعدادات» مرة واحدة، فيتذكر الجهاز الإذن.
-- أي طلب آخر إلى `/admin` يحصل على 404.
+- **التشغيل المحلي (`node server.js`)**: لا كلمة مرور؛ من الجهاز الذي يشغّل الخادم تفتح اللوحة مباشرة، ومن جهاز آخر تفتح الرابط السري من «الإعدادات» مرة واحدة. الرابط السري محفوظ في `data/config.json` (ملف محلي غير مرفوع إلى Git). أي طلب آخر إلى `/admin` يعيد 404.
+- **الموقع المنشور على Netlify**: الدخول بحساب مدير عبر Supabase Auth وكلمة مرور يديرها مالك المشروع. التسجيل العام مغلق، ولا يوجد رابط سري ولا دخول تلقائي من localhost. لا تُخزَّن كلمة المرور أو البريد الإداري هنا أو في Git.
 
-من يملك الرابط السري يستطيع تعديل الموقع. وإذا تسرّب غيّره من «الإعدادات».
+## النشر
 
-## النشر على خادم
+المسار الرسمي هو Netlify المرتبط بالفرع `main` (انظر «النشر على Netlify» أدناه). ما يلي خيار محلي لتشغيل `server.js` على خادم Node.js وليس مسار الإنتاج:
 
-ارفع المجلد كاملًا إلى أي خادم يدعم Node.js، ثم شغّل `npm start`. يقرأ الخادم المنفذ من المتغير `PORT`.
+ارفع المجلد إلى خادم يدعم Node.js، ثم شغّل `npm start`. يقرأ الخادم المنفذ من المتغير `PORT`.
 
 - يجب أن يكون مجلد `data/` ومجلد `assets/uploads/` على تخزين دائم، وإلا ضاعت التعديلات والزيارات عند إعادة التشغيل.
 - لا يعمل التتبع على الاستضافات الثابتة التي لا تشغّل Node.js.
@@ -48,14 +57,16 @@ node server.js
 | `data/config.json` | الرابط السري ومفتاح بصمة الزوار، **لا تشاركه** |
 | `data/trash/` | الصور المحذوفة من المكتبة |
 
-## معاينة Netlify (Draft Deploy)
+## النشر على Netlify (الإنتاج)
 
-الموقع العام منشور كمعاينة تجريبية (Draft Deploy) على Netlify، وليس نشرًا إنتاجيًا:
+الموقع العام منشور رسميًا على Netlify، والموقع مرتبط بمستودع GitHub `Xe6cs/C-cafe` على الفرع `main`:
 
-- الموقع: `c-cafe-preview` (`e5cdc6ec-a8af-4154-bba7-b97d4eea63f4`)، ولا يوجد نشر إنتاجي حاليًا؛ `https://c-cafe-preview.netlify.app/` يعيد 404.
-- رابط المعاينة الحالي (Draft Deploy): `https://6af0598146d3333788ef1350--c-cafe-preview.netlify.app`.
-- النشر من الملفات المحلية بلا GitHub وبلا commit أو push، وبلا دومين مخصص.
-- رابط الـDraft Deploy ثابت لهذه الحزمة، وأي نشر جديد ينشئ رابطًا جديدًا؛ لا تُستخدم روابط قديمة للتحقق.
+- الموقع: `c-cafe-preview` (`e5cdc6ec-a8af-4154-bba7-b97d4eea63f4`)، والرابط الرسمي `https://c-cafe-preview.netlify.app` (HTTPS، بلا دومين مخصص).
+- يُنشر من commit معروف على `main` بـ`npm run build`، ونشر `dist` والدوال من `netlify/functions`.
+- الإعداد: `NODE_VERSION=24` في `netlify.toml`، و`build.command=npm run build`، و`publish=dist`، و`functions=netlify/functions`.
+- `CCAFE_PREVIEW_ONLY` مُزال من الإنتاج (تبقى المعاينات `noindex`)، و`CCAFE_VERIFY_ORIGIN=https://c-cafe-preview.netlify.app`.
+- التحليلات في الإنتاج `CCAFE_ANALYTICS_ENV=production` ببيانات معزولة عن `preview`؛ سر الاستيعاب نفسه يُستخدم في البيئتين، والفصل عبر `analytics_events.env` و`analytics_rate_limits.env`.
+- روابط Deploy Preview القديمة (مثل `https://6af0598146d3333788ef1350--c-cafe-preview.netlify.app`) تاريخية ولا تُستخدم للتحقق من الإنتاج.
 
 ```bash
 npm run build            # يبني dist/ من قائمة سماح صريحة (18 ملفًا)
@@ -69,7 +80,7 @@ PREVIEW_URL=https://... EXPECT_PREVIEW=1 npm run check:preview
 PREVIEW_URL=https://... EXPECT_SOURCE=fallback EXPECT_PREVIEW=1 npm run check:preview
 ```
 
-متغيرات المعاينة: `CCAFE_PREVIEW_ONLY=1` يضيف `X-Robots-Tag: noindex` ووسم `robots` إلى الاستجابات الحية، ويُضاف `noindex` دائمًا إلى الاستجابات الاحتياطية. **أزل `CCAFE_PREVIEW_ONLY` قبل أي نشر إنتاجي** حتى لا يُفرض `noindex` على الإنتاج. الاستجابات الاحتياطية تبقى `noindex` في كل الأحوال.
+متغيرات المعاينة: `CCAFE_PREVIEW_ONLY=1` يضيف `X-Robots-Tag: noindex` ووسم `robots` إلى الاستجابات الحية، ويُضاف `noindex` دائمًا إلى الاستجابات الاحتياطية. في الإنتاج **أُزيل `CCAFE_PREVIEW_ONLY`** حتى لا يُفرض `noindex`، مع بقاء `noindex` على الاستجابات الاحتياطية وعلى لوحة `/admin` في كل البيئات.
 
 - `scripts/public-files.mjs` هي قائمة السماح الوحيدة؛ البناء يفشل إذا نقص أصل أو ظهر ملف ممنوع.
 - `dist/` لا يحتوي `index.html` ولا `data/` أو `admin/` أو `supabase/` أو الاختبارات أو ملفات البيئة. `track.js` أصبح أصلًا عامًا، لكن الصفحة لا تحمّله إلا إذا فُعِّل التتبع صراحةً.
@@ -78,7 +89,7 @@ PREVIEW_URL=https://... EXPECT_SOURCE=fallback EXPECT_PREVIEW=1 npm run check:pr
 - علامة النسخة: `<meta name="ccafe-content-version" content="...">`، وترويسات `X-CCafe-Source: live|fallback` و`X-CCafe-Version` و`X-CCafe-Reason`.
 - عند فشل الاتصال أو انتهاء المهلة أو وصول بيانات غير صالحة تُستخدم لقطة ثابتة في `netlify/functions/content-fallback.json` مع `X-CCafe-Source: fallback` و`X-Robots-Tag: noindex`. اللقطة **ليست** بالضرورة آخر محتوى منشور، ولا يحدّثها البناء.
 - لا كاش CDN للمحتوى الديناميكي في هذه المرحلة (`Cache-Control: no-store`).
-- التتبع اختياري لكل نشر: لا يُضمَّن `track.js` ولا يُفعَّل `/api/track` إلا عند ضبط `CCAFE_ANALYTICS_ENV` صراحةً إلى `preview` أو `production`. في هذه المرحلة تُضبط على `preview` فقط. أي قيمة أخرى أو غيابها يعطّل الإدخال والإحصاءات معًا. فتح اللوحة أو معاينة المسودة لا يولّد زيارات، لأن معاينة المدير تُبنى بـ`analytics:false` وبلا سكربتات.
+- التتبع اختياري لكل نشر: لا يُضمَّن `track.js` ولا يُفعَّل `/api/track` إلا عند ضبط `CCAFE_ANALYTICS_ENV` صراحةً إلى `preview` أو `production`. في الإنتاج تُضبط إلى `production`، وفي Deploy Previews إلى `preview`؛ أي قيمة أخرى أو غيابها يعطّل الإدخال والإحصاءات معًا. فتح اللوحة أو معاينة المسودة لا يولّد زيارات، لأن معاينة المدير تُبنى بـ`analytics:false` وبلا سكربتات.
 - زيارات المعاينة تُوسم `env='preview'` وتُعزل تمامًا عن `production` في التخزين والاستعلام والمسح؛ لا تُجمع أحداث من النشرات التجريبية القديمة لأن التتبع لم يكن مفعّلًا فيها. التشغيل المحلي عبر `server.js` يبقى كما هو ولا يرسل إلى Supabase.
 
 متغيرات الدالة المطلوبة (أسماء فقط): `SUPABASE_URL` و`SUPABASE_ANON_KEY`. واختياريًا `CCAFE_SUPABASE_TIMEOUT_MS` (الافتراضي 5000 مللي ثانية) و`CCAFE_PREVIEW_ONLY` للمعاينة، وللتحقق من الظهور `CCAFE_VERIFY_ORIGIN` (أصل معاينة Netlify مسموح)، و`CCAFE_MEDIA_FINALIZE_TOKEN` لاعتماد الصور المرفوعة، وللتحليلات `CCAFE_ANALYTICS_ENV` (`preview` أو `production` فقط) و`CCAFE_ANALYTICS_INGEST_TOKEN` (64 hex). إن غاب `CCAFE_VERIFY_ORIGIN` يُستخدم `DEPLOY_PRIME_URL` ثم `Host` الذي يراه الخادم بعد قائمة سماح؛ لا يُقرأ أي URL من العميل. لا تُضاف `service_role` أو `SUPABASE_ACCESS_TOKEN` أو كلمة مرور قاعدة البيانات إلى Netlify.
@@ -104,7 +115,7 @@ PREVIEW_URL=https://... EXPECT_SOURCE=fallback EXPECT_PREVIEW=1 npm run check:pr
 - كل استجابات الواجهة والإدارة `no-store` و`noindex` مع CSP صارمة، والجلسة في الذاكرة فقط (`persistSession: false`) ولا تُحفظ في `localStorage` أو الكوكيز.
 - تعارضات النسخ تُطلق SQLSTATE `PT409` (لا `40001`، لأن PostgREST يعيد المحاولة عليه حتى انتهاء المهلة) فتصل كـHTTP 409 فورًا. التفاصيل في `supabase/migrations/20261108020000_conflict_sqlstate.sql`.
 - الواجهة تُقدَّم من `netlify/functions/admin-ui.js` لا كملفات ثابتة، و`netlify/admin/vendor/supabase.js` يُنسخ من حزمة `@supabase/supabase-js@2.119.0` المثبّتة عند `npm run build` (مستبعد من Git).
-- لا يوجد حساب مدير نهائي في هذه المرحلة. في مرحلة النشر/الاستعادة أُنشئ حساب اختبار عبر **Auth Admin API**، ثم أُنهيت جلساته وحُذف عبر **Auth Admin API** أيضًا (لا حذف مباشر من جداول `auth`)، فبقي `auth.users=0` و`admin_users=0`. (في مرحلة سابقة حُذفت حسابات اختبار مباشرة بـSQL من جداول `auth`، وهو أسلوب غير معتمد ولا يُعاد استخدامه.)
+- الحالة النهائية: حساب مدير واحد في Supabase Auth ومنحة واحدة في `public.admin_users`؛ التسجيل العام مغلق. كلمة المرور والبريد الإداري لا يُخزَّنان هنا ولا في Git؛ مالك المشروع وحده يملكهما. حسابات الاختبار السابقة أُنشئت وحُذفت عبر **Auth Admin API** (لا حذف مباشر من جداول `auth`)، وبعدها بقي `auth.users=1` و`admin_users=1` للحساب النهائي فقط. (في مرحلة سابقة حُذفت حسابات اختبار مباشرة بـSQL من جداول `auth`، وهو أسلوب غير معتمد ولا يُعاد استخدامه.)
 
 ### مرحلة النشر والاستعادة (2026-11-08)
 
@@ -176,7 +187,7 @@ PREVIEW_URL=https://... EXPECT_SOURCE=fallback EXPECT_PREVIEW=1 npm run check:pr
 
 ### حزمة النشر و`sharp`
 
-`admin-api` يحمّل `sharp` ديناميكيًا داخل `finalize`، فلا يستطيع مُجمِّع Netlify تتبعه. لذلك يضمّن `netlify.toml` (قسم `[functions.admin-api]`) الحزم `node_modules/sharp`, `detect-libc`, `semver`, `@img/colour`, وحزمتي Linux x64: `@img/sharp-linux-x64` و`@img/sharp-libvips-linux-x64`. على محطة Windows يجب جلب حزم Linux يدويًا (`npm pack @img/sharp-linux-x64@0.35.5 @img/sharp-libvips-linux-x64@1.3.4` ثم فكّها داخل `node_modules/@img/`) قبل `netlify build`، وإلا يفشل `finalize` بـ`422 invalid_image` مع `reason=verifier_unavailable`. النشر يُبنى بـ`netlify build` ثم `netlify deploy --no-build --dir dist --functions .netlify/functions`؛ لا يُستخدم `--remote` لأن المشروع غير مربوط بمستودع Git.
+`admin-api` يحمّل `sharp` ديناميكيًا داخل `finalize`، فلا يستطيع مُجمِّع Netlify تتبعه. لذلك يضمّن `netlify.toml` (قسم `[functions.admin-api]`) الحزم `node_modules/sharp`, `detect-libc`, `semver`, `@img/colour`, وحزمتي Linux x64: `@img/sharp-linux-x64` و`@img/sharp-libvips-linux-x64`. على محطة Windows يجب جلب حزم Linux يدويًا (`npm pack @img/sharp-linux-x64@0.35.5 @img/sharp-libvips-linux-x64@1.3.4` ثم فكّها داخل `node_modules/@img/`) قبل `netlify build`، وإلا يفشل `finalize` بـ`422 invalid_image` مع `reason=verifier_unavailable`. النشر الرسمي يُبنى من `main` بـ`npm run build` عبر `netlify.toml`؛ لا حاجة إلى `npm pack` يدوي لأن Netlify يبني على Linux. عند البناء المحلي للاختبار على Windows استخدم `npm run build` ثم تحقق من وجود حزم Linux داخل `node_modules/@img/`.
 
 ### الاختبارات
 
@@ -211,8 +222,8 @@ PREVIEW_URL=https://... EXPECT_SOURCE=fallback EXPECT_PREVIEW=1 npm run check:pr
 
 ### الإعداد والتعطيل
 
-- إعداد المعاينة في Netlify (Functions scope، موقع `c-cafe-preview` فقط): `CCAFE_ANALYTICS_ENV=preview` و`CCAFE_ANALYTICS_INGEST_TOKEN=<64 hex>`. السر الجديد لا يُعاد استخدامه مع `CCAFE_MEDIA_FINALIZE_TOKEN`، ولا يُضاف إلى المتصفح أو إلى Git. تُخزَّن بصمته من الطبقة الثانية `D2` فقط في `public.analytics_secrets`، فلا تصلح حتى لو تسربت كاعتماد مباشر. ملفات الترحيل تحتوي بصمات وهمية خاملة؛ بعد تثبيت جديد أو استعادة، حدّث `public.analytics_secrets` و`public.media_secrets` من السرين المولّدين أو من صفوف النسخة الاحتياطية، ولا تعتمد على قيم الترحيل.
-- إعداد الإنتاج (غير مفعّل الآن): نفس المتغيرين مع `CCAFE_ANALYTICS_ENV=production` على موقع الإنتاج فقط، مع تجديد السر أو استخدام سر مستقل، ومراجعة أن `CCAFE_PREVIEW_ONLY` غير مضبوط. لا تشارك بيانات `preview` و`production` أي صف أو عدّاد.
+- إعداد المعاينة في Netlify (Functions scope، موقع `c-cafe-preview` فقط): `CCAFE_ANALYTICS_ENV=preview` و`CCAFE_ANALYTICS_INGEST_TOKEN=<64 hex>`. السر لا يُعاد استخدامه مع `CCAFE_MEDIA_FINALIZE_TOKEN`، ولا يُضاف إلى المتصفح أو إلى Git. تُخزَّن بصمته من الطبقة الثانية `D2` فقط في `public.analytics_secrets`، فلا تصلح حتى لو تسربت كاعتماد مباشر. ملفات الترحيل تحتوي بصمات وهمية خاملة؛ بعد تثبيت جديد أو استعادة، حدّث `public.analytics_secrets` و`public.media_secrets` من السرين المولّدين أو من صفوف النسخة الاحتياطية، ولا تعتمد على قيم الترحيل.
+- إعداد الإنتاج (مفعّل): نفس سر الاستيعاب مع `CCAFE_ANALYTICS_ENV=production` على موقع `c-cafe-preview`، و`CCAFE_PREVIEW_ONLY` مُزال من الإنتاج. سر الاستيعاب واحد مشترك بين سياقَي `deploy-preview` و`production` لأن `public.analytics_secrets` صف واحد عام بلا عمود `env`؛ الفصل الكامل يتم عبر `analytics_events.env` و`analytics_rate_limits.env`، فلا تشارك البيئتان أي صف أو عدّاد. لا تُدوّر السر ولا تُنشئ صفًا إضافيًا له.
 - التعطيل الكامل: أزل `CCAFE_ANALYTICS_ENV` (أو اتركه فارغًا) وأعد النشر. تتوقف الدالة عن الإدخال، وتختفي الصفحة، ولا تُحمَّل `track.js`؛ تبقى الأحداث المخزنة كما هي حتى تنظيفها أو مسحها.
 - تعطيل التنظيف وحده: `select cron.unschedule('ccafe_analytics_purge');` على المشروع، أو استدعاء الدالة يدويًا عند الحاجة. لا تُمنح الدالة لأي دور API.
 
@@ -226,13 +237,13 @@ PREVIEW_URL=https://... EXPECT_SOURCE=fallback EXPECT_PREVIEW=1 npm run check:pr
 
 ### التحقق الحي على المعاينة
 
-- نُشر Draft على `https://6af9b9d7f8f76d4811d8166d--c-cafe-preview.netlify.app` بعد ربط الموقع وتحميل متغيرَي المعاينة.
+- نُشر Draft تاريخيًا على `https://6af9b9d7f8f76d4811d8166d--c-cafe-preview.netlify.app` لاختبار التحليلات؛ الرابط الرسمي الحالي هو `https://c-cafe-preview.netlify.app`.
 - سكربت اختبار حي (46 فحصًا) نجح كاملًا: الصفحة والأصول، غياب السر عن الصفحة و`track.js`، خلو `/admin` ومعاينة المسودة من التتبع، عقد `/api/track` (405/403/400/413/204)، صلاحيات المدير (401/403/200/400)، مطابقة اللقطة للأحداث الخمسة، ورفض `D2` والسر الخام وقراءة الجداول عبر PostgREST.
 - اختبار حد مستقل: 130 طلبًا متتاليًا أعادت `204` جميعًا، وأظهر العدّاد المشترك `minute.count=130` مع `120` حدثًا مخزّنًا فقط و`day.count=120`؛ أي أن الرفض لا يُكشف للعميل لكنه يمنع الكتابة.
 - عزل المسح: صف `production` تجريبي وعداداته (`9`) بقيت بعد مسح `preview`، ثم حُذفت يدويًا في التنظيف.
 - التنظيف المجدول: `cron.job` يظهر `ccafe_analytics_purge` نشطًا (`15 3 * * *`، `postgres`)، وسجل `cron.job_run_details` يظهر تنفيذًا ناجحًا عند `2026-11-16 03:15 UTC`. استدعاء `analytics_purge_expired(90)` يدويًا حذف حدثًا عمره 91 يومًا وعدادًا عمره 3 أيام وأبقى الحدث والعداد الحديثين.
 - سجلات Netlify للدوال خلال آخر ساعة (445 سطرًا) لا تحتوي السر الخام ولا `D1` ولا `D2` ولا أجسام الأحداث أو IP أو ترويسات الاعتماد؛ لا تسجيل للأجسام في الكود أصلًا.
-- بعد الاختبارات: `analytics_events=0` و`analytics_rate_limits=0` و`admin_users=0` و`auth.users=0`؛ والمحتوى بلا تغيير (`version=257`, `content_md5=e4a10787ac32b6b30721c7984b219008`, history=15, drafts=0, trash=0, public_assets=4).
+- بعد اختبارات التحليلات المؤقتة حُذفت أحداثها، ثم أُنشئ حساب المدير النهائي و20 حدث معاينة أُبقيت عمدًا. الحالة النهائية عند التسليم: `version=259`، `content_md5=e4a10787ac32b6b30721c7984b219008`، history=16، drafts=0، `analytics_events=20` (كلها `env='preview'`)، `admin_users=1`، `auth.users=1`. لم تُمسح أحداث المعاينة ولا سجل المحتوى.
 - ما بقي غير مختبر آليًا: عرض 390px (البيئة الآلية تفرض `innerWidth=800` وترفض `resizeTo`) → يحتاج فحصًا يدويًا على الهاتف.
 
 ## الاختبارات
@@ -241,17 +252,27 @@ PREVIEW_URL=https://... EXPECT_SOURCE=fallback EXPECT_PREVIEW=1 npm run check:pr
 npm test                  # اختبارات التطبيق والـAPI الإداري (119)
 npm run test:db           # PGlite (36)
 npm run test:db:real      # PostgreSQL محلي حقيقي (13)
-npm run verify:supabase   # تحقق إلزامي من مشروع C-cafe السحابي (6)
 ```
 
-`npm run verify:supabase` يتطلب `CCAFE_PROJECT_REF`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_ACCESS_TOKEN`، ويفشل بوضوح إذا نقص أي منها أو كان مرجع المشروع غير `mzbhncsdpdbxsdswzruc`. التفاصيل في `supabase/README.md`.
+`npm run verify:supabase` مدقق خاص بمرحلة مبكرة: توقعاته (صفر مديرين، صفر مستخدمي Auth، ترحيلان، صفر فحوص) كانت صحيحة قبل إنشاء الحساب النهائي ولم تُحدَّث؛ لذلك لا يُستخدم كفحص نهائي. الحالة الحية الموثّقة عند التسليم في `pre-launch-baseline.json` داخل النسخة الاحتياطية. التفاصيل في `supabase/README.md`.
 
-## حالة المشروع قبل نقل الاستضافة
+## الحالة النهائية والاستعادة
 
-- التشغيل الحالي كما هو: `node server.js` أو `npm start`، والاختبارات عبر `npm test`. لا يحتاج المشروع إلى `npm install`.
+- التشغيل: `node server.js` أو `npm start` محليًا، والبناء والنشر على Netlify من الفرع `main`. الاختبارات المعتمدة عند التسليم: `npm test` و`npm run test:db` و`npm run test:db:real`. (`npm run verify:supabase` مدقق مرحلة مبكرة بتوقعات قديمة — صفر مديرين وترحيلان — ولا يُستخدم للتحقق بعد النشر.)
+- Node.js: 20.9.0 أو أحدث محليًا، و24 على Netlify. يلزم `npm ci` قبل البناء أو تشغيل الدوال محليًا بسبب `sharp`.
 - `index.html` **ملف مولَّد** من `data/content.json` عبر القالب في `lib/render.js`؛ لا تعدّله يدويًا لأنه سيُستبدل عند النشر.
-- ملفات محلية لا تُرفع إلى Git: `data/config.json` (أسرار الدخول)، `data/events/`، `data/trash/`، `data/draft.json`، `assets/uploads/`، وملفات `.env` و`.env.*`، و`node_modules/`، و`.netlify/`، و`dist/`، والسجلات والنسخ المحلية.
-- `.env.example` يوثّق أسماء المتغيرات المتوقعة فقط بقيم فارغة، والتطبيق الحالي **لا يقرأها بعد**.
-- مخطط Supabase وصلاحياته طُبِّقا على مشروع `C-cafe` السحابي، والموقع العام على Netlify يقرأ المحتوى المنشور من قاعدة البيانات، ولوحة `/admin/` على المعاينة تسمح للمدير بتحرير المسودة وحفظها ومعاينتها ونشرها واستعادة النسخ بعد التحقق من JWT وعضوية `admin_users`، ومكتبة الوسائط تسمح برفع صور خاصة واعتمادها بعد التحقق واختيارها في المسودة.
-- لا يوجد نشر إنتاجي ولا دومين مخصص ولا حساب مدير نهائي بعد. طريقة النشر النهائية وصلاحيات الإدارة (من يدير المحتوى وكيف) ستُحدَّد في مرحلة لاحقة.
-- سجل migrations على القاعدة يسجل `20261106120000` و`20261106121000` و`20261108020000` و`20261109090000` و`20261110090000`، ومطابق للملفات المحلية بلا ترحيلات مفقودة. سُجّل `20261108020000` رسميًا عبر `supabase migration repair --status applied` بعد التحقق من تطابق الدوال السبع الحية حرفيًا (بما فيها `SECURITY DEFINER` و`search_path=''` والتوقيعات)؛ لا ترحيل تصحيحي معلّق.
+- ملفات محلية لا تُرفع إلى Git: `data/config.json` (أسرار الدخول المحلية)، `data/events/`، `data/trash/`، `data/draft.json`، `assets/uploads/`، وملفات `.env` و`.env.*`، و`node_modules/`، و`.netlify/`، و`dist/`، والسجلات والنسخ المحلية.
+- `.env.example` يوثّق أسماء المتغيرات المتوقعة بقيم فارغة؛ القيم الفعلية تُضبط في Netlify لكل سياق، ولا تُخزَّن في Git.
+- مخطط Supabase وصلاحياته مطبَّق على مشروع `C-cafe` السحابي، والموقع العام على Netlify يقرأ المحتوى المنشور من قاعدة البيانات، ولوحة `/admin/` تسمح للمدير بتحرير المسودة وحفظها ومعاينتها ونشرها واستعادة النسخ بعد التحقق من JWT وعضوية `admin_users`، ومكتبة الوسائط تسمح برفع صور خاصة واعتمادها بعد التحقق واختيارها في المسودة.
+- الإنتاج منشور على `https://c-cafe-preview.netlify.app` بلا دومين مخصص وبلا ترقية مدفوعة. `CCAFE_PREVIEW_ONLY` مُزال من الإنتاج، و`CCAFE_VERIFY_ORIGIN=https://c-cafe-preview.netlify.app`، والتحليلات `production` ببيانات معزولة عن `preview`. لا تُضاف `service_role` أو `SUPABASE_ACCESS_TOKEN` أو كلمة مرور قاعدة البيانات إلى Netlify.
+- الحالة المنشورة: `version=259`، `content_md5=e4a10787ac32b6b30721c7984b219008`، 16 نسخة في السجل، بلا مسودة، 5 أصول وسائط (4 عامة والصورة الخاصة المحفوظة `2708511d-e634-4b53-bc52-c58ee8a65f8c`)، 20 حدث معاينة، مدير واحد، ومستخدم Auth واحد، والتسجيل مغلق.
+- كاش المحتوى الديناميكي مطفأ (`Cache-Control: no-store`)، ومهمة `analytics_purge_expired(90)` مفعّلة، وسجل migrations كامل ومطابق (12 ترحيلًا، آخرها `20261116090000`) بلا ترحيل تصحيحي معلّق. سُجّل `20261108020000` رسميًا عبر `supabase migration repair --status applied` بعد التحقق من تطابق الدوال السبع الحية حرفيًا.
+
+### الاستعادة
+
+1. استخرج مجلد النسخة الاحتياطية المعتمدة خارج Git، وفكّ حزمة الأسرار المشفّرة على نفس حساب Windows.
+2. استعد شجرة Git أو مجلد `repo/`، ثم شغّل `npm ci` وطبّق `supabase/migrations` بالترتيب.
+3. حمّل جداول `db/tables/`، ثم بيانات `db/auth/` غير الحاملة لكلمات المرور، ثم كائنات `storage/`، وقارن التجزئات بـ`storage/summary.json`.
+4. استبدل صفوف البصمات الوهمية في `public.analytics_secrets` و`public.media_secrets` بصفوف النسخة، أو دوّر السرين في Netlify والقاعدة معًا.
+5. اضبط متغيرات Netlify لكل سياق (`all` مقابل `deploy-preview` مقابل `production`) قبل أي نشر، وتحقق من غياب `CCAFE_PREVIEW_ONLY` في الإنتاج.
+6. **كلمة المرور غير قابلة للاستعادة من النسخة**: على مالك المشروع إعادة تعيينها عبر Supabase Dashboard ثم اختبار الدخول يدويًا. لم يُختبر استعادة الدخول في التحقق المعزول.
