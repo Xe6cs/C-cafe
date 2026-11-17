@@ -5,7 +5,7 @@
 - الرابط الرسمي: `https://c-cafe-preview.netlify.app` (HTTPS، بلا دومين مخصص وبلا ترقية مدفوعة).
 - المستودع `Xe6cs/C-cafe`، الفرع `main`، والنشر من commit معروف بـ`npm run build` ونشر `dist` والدوال `netlify/functions`.
 - Node.js: 24 على Netlify (`netlify.toml`) و20.9.0 أو أحدث محليًا. يلزم `npm ci` قبل البناء لأن `sharp` مطلوب لإعلان الوسائط.
-- المحتوى المنشور: الإصدار `259` وبصمة `e4a10787ac32b6b30721c7984b219008`، محفوظ بالكامل في النسخة الاحتياطية.
+- المحتوى المنشور: الإصدار `260` وبصمة `26388f5f558993b7c4f3af005bd053ae`، محفوظ بالكامل في النسخة الاحتياطية.
 - لوحة التحكم: حساب مدير واحد في Supabase Auth ومنحة واحدة في `public.admin_users`؛ التسجيل العام مغلق. البريد وكلمة المرور لا يُخزَّنان في المستودع أو التوثيق، ومالك المشروع يديرهما.
 - التحليلات: `CCAFE_ANALYTICS_ENV=production` في الإنتاج و`preview` في المعاينات، ببيانات معزولة؛ `CCAFE_PREVIEW_ONLY` مُزال من الإنتاج، و`CCAFE_VERIFY_ORIGIN=https://c-cafe-preview.netlify.app`.
 - كاش المحتوى الديناميكي مطفأ، ومهمة `analytics_purge_expired(90)` مفعّلة.
@@ -63,6 +63,7 @@ node server.js
 
 - الموقع: `c-cafe-preview` (`e5cdc6ec-a8af-4154-bba7-b97d4eea63f4`)، والرابط الرسمي `https://c-cafe-preview.netlify.app` (HTTPS، بلا دومين مخصص).
 - يُنشر من commit معروف على `main` بـ`npm run build`، ونشر `dist` والدوال من `netlify/functions`.
+- الربط المستمر يعتمد على webhook في المستودع يرسل أحداث `push` إلى `https://api.netlify.com/hooks/github`؛ عند غيابه يُنشأ نشر جديد عبر API فقط ولا يبدأ نشر تلقائي عند الدفع. التحقق يتم من سجل استلام webhook في GitHub ثم من قائمة نشرات Netlify المرتبطة بالـ commit نفسه.
 - الإعداد: `NODE_VERSION=24` في `netlify.toml`، و`build.command=npm run build`، و`publish=dist`، و`functions=netlify/functions`.
 - `CCAFE_PREVIEW_ONLY` مُزال من الإنتاج (تبقى المعاينات `noindex`)، و`CCAFE_VERIFY_ORIGIN=https://c-cafe-preview.netlify.app`.
 - التحليلات في الإنتاج `CCAFE_ANALYTICS_ENV=production` ببيانات معزولة عن `preview`؛ سر الاستيعاب نفسه يُستخدم في البيئتين، والفصل عبر `analytics_events.env` و`analytics_rate_limits.env`.
