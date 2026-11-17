@@ -1,0 +1,117 @@
+# Netlify configuration for the public preview plus the admin draft editor.
+#
+# The public page is rendered by the `site` Function so no static index.html can
+# shadow it. The admin dashboard is served by the `admin-ui` Function (never as
+# cached static files) and talks to `admin-api` for draft save/preview, publish,
+# restore, public-page verification, and the private media library. Analytics
+# ingest is served by its own token-gated Function; admin analytics is part of
+# admin-api. Both are environment-scoped (`preview` or `production`).
+
+[build]
+  command = "npm run build"
+  publish = "dist"
+  functions = "netlify/functions"
+
+[build.environment]
+  # Netlify default runtime is Node 24; sharp 0.35.5 loads correctly on it.
+  NODE_VERSION = "24"
+
+[functions]
+  # The site Function requires these shared files at runtime. Listing them
+  # explicitly guarantees they are present in the deployed bundle even if
+  # Netlify's dependency tracing changes. Paths are project-relative and
+  # preserved inside the bundle, matching require('../../lib/...').
+  included_files = [
+    "lib/render.js",
+    "lib/schema.js",
+    "lib/icons.js",
+    "lib/default-content.js",
+    "lib/brand-sprite.html",
+    "lib/media-verify.js",
+    "lib/media-originals.js",
+    "lib/analytics.js",
+    "netlify/functions/content-fallback.json",
+    # admin-api inlines this stylesheet into the draft preview HTML.
+    "dist/styles.css"
+  ]
+
+[functions.admin-ui]
+  # Read at runtime by netlify/functions/admin-ui.js with paths relative to the
+  # repository root. admin.css is reused from the existing dashboard.
+  included_files = [
+    "admin/admin.css",
+    "netlify/admin/index.html",
+    "netlify/admin/app.js",
+    "netlify/admin/editor.js",
+    "netlify/admin/stats.js",
+    "netlify/admin/readonly.css",
+    "netlify/admin/editor.css",
+    "netlify/admin/vendor/supabase.js"
+  ]
+
+[functions.admin-api]
+  # lib/media-verify.js loads sharp lazily inside finalize(), so the bundler
+  # cannot trace it statically. The function runs on Linux (Netlify build image),
+  # so the Linux x64 libvips/sharp binaries must be present even when the
+  # deploy is packaged from a Windows workstation. Only the x64 Linux packages
+  # are shipped; other platforms are dev-only and stay out of the bundle.
+  included_files = [
+    "node_modules/sharp/**",
+    "node_modules/detect-libc/**",
+    "node_modules/semver/**",
+    "node_modules/@img/colour/**",
+    "node_modules/@img/sharp-linux-x64/**",
+    "node_modules/@img/sharp-libvips-linux-x64/**"
+  ]
+
+# Serve / and /index.html from the Function. force = true overrides any static
+# file that might otherwise be served first.
+[[redirects]]
+  from = "/index.html"
+  to = "/.netlify/functions/site"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/"
+  to = "/.netlify/functions/site"
+  status = 200
+  force = true
+
+# Admin draft editor. /admin and /admin/* are served by the Function so every
+# asset carries no-store, noindex and a strict CSP.
+[[redirects]]
+  from = "/admin"
+  to = "/.netlify/functions/admin-ui"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/admin/*"
+  to = "/.netlify/functions/admin-ui"
+  status = 200
+  force = true
+
+# Admin API (bootstrap, draft save/delete, publish, restore, verify, media list/
+# upload/finalize/abandon/signed URL, and private preview). This rule must come
+# before the /api/* 404 rule below.
+[[redirects]]
+  from = "/api/admin/*"
+  to = "/.netlify/functions/admin-api"
+  status = 200
+  force = true
+
+# Analytics ingest. Kept as its own Function so a tracking outage can never
+# affect the public page. This rule must come before the /api/* catch-all.
+[[redirects]]
+  from = "/api/track"
+  to = "/.netlify/functions/track"
+  status = 200
+  force = true
+
+# Any other /api/* path is answered with 404 by the site Function.
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/site"
+  status = 200
+  force = true
