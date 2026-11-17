@@ -63,7 +63,8 @@ node server.js
 
 - الموقع: `c-cafe-preview` (`e5cdc6ec-a8af-4154-bba7-b97d4eea63f4`)، والرابط الرسمي `https://c-cafe-preview.netlify.app` (HTTPS، بلا دومين مخصص).
 - يُنشر من commit معروف على `main` بـ`npm run build`، ونشر `dist` والدوال من `netlify/functions`.
-- الربط المستمر يعتمد على webhook في المستودع يرسل أحداث `push` إلى `https://api.netlify.com/hooks/github`؛ عند غيابه يُنشأ نشر جديد عبر API فقط ولا يبدأ نشر تلقائي عند الدفع. التحقق يتم من سجل استلام webhook في GitHub ثم من قائمة نشرات Netlify المرتبطة بالـ commit نفسه.
+- الربط المستمر يعتمد على webhook في المستودع يرسل أحداث `push` إلى build hook خاص بـ Netlify على الفرع `main` (العنوان الدقيق سرّي ولا يُخزَّن هنا)؛ عند غيابه يُنشأ نشر جديد عبر API فقط ولا يبدأ نشر تلقائي عند الدفع. التحقق يتم من سجل استلام webhook في GitHub ثم من قائمة نشرات Netlify المرتبطة بالـ commit نفسه.
+- بعد أي نشر تحقق من أن Deploy يظهر بعنوان `CCafe GitHub push to main` وأن الـ commit المرجعي هو أعلى `main`، ثم راجع الإصدار وcanonical والأصول من الصفحة الحية.
 - الإعداد: `NODE_VERSION=24` في `netlify.toml`، و`build.command=npm run build`، و`publish=dist`، و`functions=netlify/functions`.
 - `CCAFE_PREVIEW_ONLY` مُزال من الإنتاج (تبقى المعاينات `noindex`)، و`CCAFE_VERIFY_ORIGIN=https://c-cafe-preview.netlify.app`.
 - التحليلات في الإنتاج `CCAFE_ANALYTICS_ENV=production` ببيانات معزولة عن `preview`؛ سر الاستيعاب نفسه يُستخدم في البيئتين، والفصل عبر `analytics_events.env` و`analytics_rate_limits.env`.
