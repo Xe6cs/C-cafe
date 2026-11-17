@@ -19,7 +19,7 @@
     "seo": {
       "title": "سي كافيه | C Cafe — كل الي يحتاجه مزاجك موجود بـ سي",
       "description": "سي كافيه في السيدية، مقابل نخيل بغداد: قهوة وشاي، بليارد، مباريات على أكبر شاشة بالسيدية، وخصم 20% لطلاب الجامعات. للحجز والاستفسار: 0771 667 3643.",
-      "siteUrl": "",
+      "siteUrl": "https://c-cafe-preview.netlify.app",
       "ogImage": "assets/brand/og.jpg",
       "favicon": "assets/brand/favicon.svg",
       "touchIcon": "assets/brand/apple-touch-icon.png"
