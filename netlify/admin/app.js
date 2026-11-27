@@ -24,6 +24,7 @@
   const MEDIA_COMPRESS_MAX_DIMENSION = 4000;
   const MEDIA_REFRESH_MS = 240000;
   const MEDIA_REF_RE = /^media\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  const OPERATION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
   const EDITOR_VIEWS = new Set(['editor', 'texts', 'links', 'sections']);
   const VIEWS = new Set([...EDITOR_VIEWS, 'preview', 'published', 'history', 'media', 'stats', 'site-status']);
@@ -67,6 +68,7 @@
     publish: { busy: false, pending: null },
     restore: { busy: false, pending: null },
     historyClear: { busy: false, pending: null, confirming: false },
+    historyDelete: { busy: false, pending: null, confirmingId: null },
     siteStatus: {
       // `value` comes only from GET /api/admin/site-status. A write result is
       // historical confirmation; it is never treated as the current state.
@@ -97,6 +99,7 @@
       uploading: false,
       progress: '',
       action: { id: '', kind: '' },
+      purgePending: null,
       trash: {
         loaded: false,
         loadedAt: 0,
@@ -373,6 +376,10 @@
       ? makePending(operationId, signature)
       : { operationId, signature };
     return operationId;
+  }
+
+  function clearOperation(bucket) {
+    if (bucket && bucket.pending) bucket.pending = null;
   }
 
   function setLoginError(message) {
@@ -773,7 +780,7 @@
     if (!Number.isSafeInteger(value.width) || !Number.isSafeInteger(value.height)) return null;
     if (value.width < 1 || value.height < 1) return null;
     if (typeof value.original_name !== 'string') return null;
-    if (value.state !== 'trashed' && value.state !== 'restoring') return null;
+    if (value.state !== 'trashed' && value.state !== 'restoring' && value.state !== 'purging') return null;
     if (value.cleanup_state !== 'pending' && value.cleanup_state !== 'done') return null;
     if (value.public_cleanup_state !== undefined
       && value.public_cleanup_state !== 'none'
@@ -789,6 +796,10 @@
       height: value.height,
       deleted_at: typeof value.deleted_at === 'string' ? value.deleted_at : null,
       state: value.state,
+      purge_operation_id: typeof value.purge_operation_id === 'string'
+        && OPERATION_ID_RE.test(value.purge_operation_id)
+        ? value.purge_operation_id
+        : null,
       cleanup_state: value.cleanup_state,
       cleanup_error: typeof value.cleanup_error === 'string'
         ? value.cleanup_error.slice(0, 200)
@@ -1116,6 +1127,199 @@
       state.media.action = { id: '', kind: '' };
       if (state.view === 'media') renderMediaView();
     }
+  }
+
+  function validPurgeResult(result, item) {
+    if (!isPlainObject(result) || !isPlainObject(result.asset)) return false;
+    const asset = result.asset;
+    return asset.id === item.asset_id
+      && asset.status === 'purged'
+      && (asset.logical_path === undefined || asset.logical_path === item.logical_path);
+  }
+
+  function purgeBlockedText(error) {
+    const payload = isPlainObject(error && error.payload) ? error.payload : {};
+    const references = isPlainObject(payload.references) ? payload.references : {};
+    const reasons = Array.isArray(payload.reasons)
+      ? payload.reasons.filter((reason) => typeof reason === 'string')
+      : [];
+    if (!reasons.length) {
+      return 'لا يمكن الحذف النهائي: الصورة مرتبطة بمحتوى محفوظ. أزل المرجع ثم أعد المحاولة.';
+    }
+    const parts = reasons.map((reason) => {
+      const base = mediaUsageReasonText(reason);
+      if (reason === 'history'
+        && Number.isSafeInteger(references.history_count)
+        && references.history_count > 0) {
+        return `${base} (${references.history_count})`;
+      }
+      return base;
+    });
+    return `لا يمكن الحذف النهائي: ${parts.join(' ')} أزل المرجع ثم أعد المحاولة.`;
+  }
+
+  function rememberPurgePending(item, operationId, needsVerification) {
+    state.media.purgePending = {
+      assetId: item.asset_id,
+      path: item.logical_path,
+      name: item.original_name,
+      operationId,
+      needsVerification: needsVerification === true,
+      confirming: false,
+    };
+  }
+
+  function purgePendingItem(pending) {
+    return {
+      asset_id: pending.assetId,
+      logical_path: pending.path,
+      original_name: pending.name,
+      state: 'purging',
+      purge_operation_id: pending.operationId,
+    };
+  }
+
+  function mediaPurgeDialog(item) {
+    const CONFIRMATION = 'حذف الصورة نهائيًا';
+    return new Promise((resolve) => {
+      let settled = false; const done = (v) => { if (settled) return; settled = true; resolve(v); };
+      const input = el('input', { class: 'input', type: 'text', autocomplete: 'off', dir: 'auto', placeholder: CONFIRMATION, 'aria-label': 'اكتب عبارة التأكيد' });
+      const warning = el('p', { class: 'field-warn', hidden: true }); let confirmButton = null;
+      const sync = () => { const ok = input.value.trim() === CONFIRMATION; if (confirmButton) confirmButton.disabled = !ok; warning.hidden = ok || input.value.trim() === ''; warning.textContent = ok ? '' : `اكتب العبارة التالية كما هي: ${CONFIRMATION}`; };
+      input.addEventListener('input', sync);
+      openModal({
+        title: 'حذف نهائي من سلة المهملات',
+        body: [
+          el('p', { class: 'dialog-text' }, 'هذا الإجراء نهائي ولا يمكن التراجع عنه. سيُحذف ملف الصورة ونسخته من السلة وأي نسخة عامة مرتبطة بها بعد التحقق من عدم استخدامها.'),
+          el('p', { class: 'dialog-text' }, 'الحذف النهائي متاح من سلة المهملات فقط؛ الصورة المعتمدة النشطة يجب نقلها إلى السلة أولًا.'),
+          el('p', { class: 'dialog-text', dir: 'ltr' }, item.original_name || item.logical_path),
+          el('div', { class: 'dialog-field' }, el('label', { class: 'dialog-field-label', text: 'اكتب عبارة التأكيد' }), input, warning),
+        ],
+        actions: [
+          { label: 'إلغاء', class: 'btn btn-ghost', onClick(close) { done(false); close(); } },
+          { label: 'حذف الصورة نهائيًا', class: 'btn btn-danger', disabled: true, onClick(close) { if (input.value.trim() !== CONFIRMATION) { sync(); return; } done(true); close(); } },
+        ],
+        onClose() { done(false); },
+      });
+      const _ds = document.body.querySelectorAll('dialog'); const _dlg = _ds[_ds.length - 1];
+      confirmButton = _dlg ? Array.from(_dlg.querySelectorAll('button')).find((n) => n.textContent.includes(CONFIRMATION)) || null : null;
+      sync();
+    });
+  }
+
+  async function sendMediaPurge(item, operationId) {
+    state.media.action = { id: item.asset_id, kind: 'purge' };
+    if (state.media.purgePending) state.media.purgePending.confirming = false;
+    renderMediaView();
+    try {
+      const result = await apiSend(`${API}/media/purge`, {
+        asset_id: item.asset_id,
+        operation_id: operationId,
+        confirmation: 'حذف الصورة نهائيًا',
+      });
+      if (!validPurgeResult(result, item)) throw new Error('invalid purge response');
+      state.media.purgePending = null;
+      state.media.trash.items = state.media.trash.items.filter((t) => t.asset_id !== item.asset_id);
+      toast('تم الحذف النهائي للصورة من سلة المهملات.', 'success');
+      try {
+        await loadTrash(true);
+      } catch {
+        toast('تم الحذف النهائي، لكن تعذّر تحديث سلة المهملات. حدّث القائمة يدويًا.', 'warn');
+      }
+    } catch (error) {
+      const code = error && typeof error.code === 'string' ? error.code : '';
+      if (code === 'media_in_use') {
+        state.media.purgePending = null;
+        toast(purgeBlockedText(error), 'error');
+      } else if (code === 'cleanup_pending') {
+        rememberPurgePending(item, operationId, true);
+        toast('بدأ الحذف النهائي لكن تنظيف بعض ملفات Storage لم يُؤكَّد. لا يُعلن نجاح نهائي؛ استكمل نفس العملية.', 'warn');
+      } else {
+        rememberPurgePending(item, operationId, true);
+        if (code === 'storage_unavailable') {
+          toast('تعذّر الوصول إلى التخزين. لم يُعلن نجاح نهائي؛ استكمل نفس العملية.', 'error');
+        } else if (error && error.status === 409) {
+          toast('لا يمكن الحذف النهائي حاليًا (مرجع نشط/تعارض). حدّث السلة وتحقق من الاستخدام.', 'error');
+        } else {
+          toast('تعذّر تأكيد نتيجة الحذف النهائي. إن ضاع الرد بعد البدء، استكمل العملية نفسها.', 'error');
+        }
+      }
+      try { await loadTrash(true); } catch {}
+    } finally {
+      state.media.action = { id: '', kind: '' };
+      if (state.media.purgePending) state.media.purgePending.confirming = false;
+      renderMediaView();
+    }
+  }
+
+  async function resumePurge(item) {
+    if (!isPlainObject(item) || item.state !== 'purging') return;
+    if (anyMediaAction() || state.media.purgePending?.confirming) return;
+    const operationId = item.purge_operation_id;
+    if (typeof operationId !== 'string' || !OPERATION_ID_RE.test(operationId)) {
+      toast('لا يمكن استكمال الحذف النهائي: معرّف العملية غير متاح. حدّث السلة.', 'error');
+      return;
+    }
+    rememberPurgePending(item, operationId, false);
+    await sendMediaPurge(item, operationId);
+  }
+
+  async function resumePendingPurge() {
+    const pending = state.media.purgePending;
+    if (!pending || typeof pending.operationId !== 'string'
+      || !OPERATION_ID_RE.test(pending.operationId)) return;
+    if (anyMediaAction() || pending.confirming) return;
+    const item = purgePendingItem(pending);
+    await sendMediaPurge(item, pending.operationId);
+  }
+
+  async function purgeMediaAsset(item) {
+    if (!isPlainObject(item) || !item.asset_id) return;
+    if (item.state === 'purging') {
+      await resumePurge(item);
+      return;
+    }
+    if (anyMediaAction() || state.media.purgePending?.confirming) return;
+
+    let operationId;
+    const existing = state.media.purgePending;
+    if (existing && existing.assetId === item.asset_id
+      && typeof existing.operationId === 'string'
+      && OPERATION_ID_RE.test(existing.operationId)) {
+      operationId = existing.operationId;
+    } else {
+      state.media.purgePending = {
+        assetId: item.asset_id,
+        path: item.logical_path,
+        name: item.original_name,
+        operationId: null,
+        needsVerification: false,
+        confirming: true,
+      };
+      let confirmed = false;
+      try {
+        confirmed = await mediaPurgeDialog(item);
+      } finally {
+        if (state.media.purgePending && state.media.purgePending.assetId === item.asset_id) {
+          state.media.purgePending.confirming = false;
+        }
+      }
+      if (!confirmed) {
+        state.media.purgePending = null;
+        renderMediaView();
+        return;
+      }
+      try {
+        operationId = operationIdFor(state.media, `purge-media:${item.asset_id}`);
+      } catch {
+        state.media.purgePending = null;
+        toast('تعذّر توليد معرّف العملية.', 'error');
+        return;
+      }
+    }
+
+    rememberPurgePending(item, operationId, false);
+    await sendMediaPurge(item, operationId);
   }
 
   async function cleanupMediaAsset(item) {
@@ -1497,6 +1701,7 @@
     render();
     showAppView();
     loadMedia(true);
+    if (state.view === 'media') loadTrash(true);
   }
 
   async function onLogin(event) {
@@ -2195,6 +2400,55 @@
       latest: entries.length ? entries[0] : null,
     };
     state.loadedAt = new Date();
+  }
+
+  function deleteHistoryEntryDialog(entry) {
+    const CONFIRMATION = 'حذف هذه النسخة نهائيًا';
+    return new Promise((resolve) => {
+      let settled = false; const done = (v) => { if (settled) return; settled = true; resolve(v); };
+      const input = el('input', { class: 'input', type: 'text', autocomplete: 'off', dir: 'auto', placeholder: CONFIRMATION, 'aria-label': 'اكتب عبارة التأكيد' });
+      const warning = el('p', { class: 'field-warn', hidden: true }); let confirmButton = null;
+      const sync = () => { const m = input.value.trim() === CONFIRMATION; if (confirmButton) confirmButton.disabled = !m; warning.hidden = m || input.value.trim() === ''; warning.textContent = m ? '' : `اكتب العبارة التالية كما هي: ${CONFIRMATION}`; };
+      input.addEventListener('input', sync);
+      const isCurrent = state.published && entry.version === state.published.version;
+      openModal({
+        title: `حذف النسخة #${entry.version} من السجل`,
+        body: [
+          el('p', { class: 'dialog-text' }, `سيُحذف صف السجل للإصدار #${entry.version} بتاريخ ${formatDateTime(entry.created_at)} فقط. لن يتغير المحتوى المنشور الحالي، ولا المسودة، ولا الوسائط، ولا المستخدمون، ولا حالة الموقع.`),
+          isCurrent ? el('p', { class: 'dialog-text' }, 'هذه النسخة تطابق رقم الإصدار المنشور الحالي؛ حذف صفها من السجل لا يزيل المحتوى من الموقع ولا يغيّر رقم الإصدار المنشور.') : null,
+          el('div', { class: 'dialog-field' }, el('label', { class: 'dialog-field-label', text: 'اكتب عبارة التأكيد' }), input, warning),
+        ],
+        actions: [
+          { label: 'إلغاء', class: 'btn btn-ghost', onClick(close) { done(false); close(); } },
+          { label: 'حذف هذه النسخة نهائيًا', class: 'btn btn-danger', disabled: true, onClick(close) { if (input.value.trim() !== CONFIRMATION) { sync(); return; } done(true); close(); } },
+        ],
+        onClose() { done(false); },
+      });
+      const _ds = document.body.querySelectorAll('dialog'); const _dlg = _ds[_ds.length - 1];
+      confirmButton = _dlg ? Array.from(_dlg.querySelectorAll('button')).find((n) => n.textContent.includes(CONFIRMATION)) || null : null;
+      sync();
+    });
+  }
+  async function onDeleteHistoryEntry(entry) {
+    if (state.historyDelete.confirmingId || state.historyDelete.busy) return;
+    if (operationBlocked()) return;
+    state.historyDelete.confirmingId = entry.id;
+    let confirmed = false; try { confirmed = await deleteHistoryEntryDialog(entry); } finally { if (!confirmed) state.historyDelete.confirmingId = null; }
+    if (!confirmed) return;
+    state.historyDelete.busy = true; updateStatus(); if (state.view === 'history') renderHistory();
+    let operationId; try { operationId = operationIdFor(state.historyDelete, `delete-history:${entry.id}:حذف هذه النسخة نهائيًا`); } catch { state.historyDelete.busy = false; state.historyDelete.confirmingId = null; updateStatus(); if (state.view === 'history') renderHistory(); toast('تعذّر توليد معرّف العملية في هذا المتصفح.', 'error'); return; }
+    try {
+      const result = await apiSend(`${API}/history/delete`, { history_id: entry.id, operation_id: operationId, confirmation: 'حذف هذه النسخة نهائيًا' });
+      if (!isPlainObject(result) || result.history_id !== entry.id) throw new Error('invalid history delete response');
+      clearOperation(state.historyDelete);
+      state.history = state.history.filter((e) => e.id !== entry.id);
+      try { await refreshHistoryOnly(); toast(`حُذفت نسخة السجل #${result.version || entry.version} نهائيًا. لم يتغير المحتوى المنشور.`, 'success'); } catch { toast('تم حذف نسخة السجل، لكن تعذّر تحديث القائمة. حدّث الصفحة يدويًا.', 'warn'); }
+      if (state.view === 'history') renderHistory();
+    } catch (err) {
+      if (err?.status === 404) { clearOperation(state.historyDelete); toast('نسخة السجل المطلوبة غير موجودة أو حُذفت بالفعل.', 'warn'); try { await refreshHistoryOnly(); if (state.view === 'history') renderHistory(); } catch {} }
+      else if (err?.status === 409) toast('تعذّر حذف نسخة السجل بسبب تعارض/قفل. أعد المحاولة.', 'error');
+      else toast('تعذّر تأكيد حذف نسخة السجل. إن ضاع الرد، أعد المحاولة بنفس الزر.', 'error');
+    } finally { state.historyDelete.busy = false; state.historyDelete.confirmingId = null; updateStatus(); if (state.view === 'history') renderHistory(); }
   }
 
   async function onClearHistory() {
@@ -3285,59 +3539,25 @@
   function trashCard(item) {
     const restoring = mediaActionBusy(item.asset_id, 'restore');
     const cleaning = mediaActionBusy(item.asset_id, 'cleanup');
+    const purging = mediaActionBusy(item.asset_id, 'purge');
     const busy = anyMediaAction();
-    const stateLabel = item.state === 'restoring' ? 'قيد الاسترداد' : 'في سلة المهملات';
-    const cleanupLabel = item.cleanup_state === 'done'
-      ? 'نُظّف الملف الأصلي'
-      : 'تنظيف الأصل معلّق';
-    const publicCleanupLabel = item.public_cleanup_state === 'done'
-      ? 'نُظّفت النسخة العامة'
-      : 'تنظيف النسخة العامة معلّق';
+    const stateLabel = item.state === 'restoring' ? 'قيد الاسترداد' : item.state === 'purging' ? 'جارٍ الحذف النهائي' : 'في سلة المهملات';
+    const cleanupLabel = item.cleanup_state === 'done' ? 'نُظّف الملف الأصلي' : 'تنظيف الأصل معلّق';
+    const publicCleanupLabel = item.public_cleanup_state === 'done' ? 'نُظّفت النسخة العامة' : 'تنظيف النسخة العامة معلّق';
     const publicCleanupPending = item.public_cleanup_state === 'pending';
     const needsCleanup = item.cleanup_state === 'pending' || publicCleanupPending;
     const meta = `${formatDimensions(item.width, item.height)} · ${formatBytes(item.bytes)}`;
     return el('figure', { class: 'media-card media-card-trash' },
       mediaThumb('', 'في السلة'),
       el('span', { class: 'media-name', dir: 'ltr', text: item.original_name }),
-      el('span', { class: 'media-meta' },
-        el('span', { class: 'media-meta-text', text: meta }),
-        el('span', { class: 'badge badge-off', text: stateLabel })),
-      el('span', { class: 'media-meta' },
-        el('span', {
-          class: 'media-meta-text',
-          text: item.deleted_at ? `حُذفت ${formatDateTime(item.deleted_at)}` : '—',
-        }),
-        el('span', {
-          class: item.cleanup_state === 'done' ? 'badge badge-on' : 'badge',
-          text: cleanupLabel,
-        })),
-      item.public_cleanup_state !== 'none'
-        ? el('span', {
-          class: publicCleanupPending ? 'badge' : 'badge badge-on',
-          text: publicCleanupLabel,
-        })
-        : null,
-      item.cleanup_error || item.public_cleanup_error
-        ? el('span', {
-          class: 'group-hint',
-          text: 'تعذّر تنظيف بعض الملفات سابقًا؛ النسخة المحفوظة سليمة ويمكن إعادة المحاولة.',
-        })
-        : null,
+      el('span', { class: 'media-meta' }, el('span', { class: 'media-meta-text', text: meta }), el('span', { class: 'badge badge-off', text: stateLabel })),
+      el('span', { class: 'media-meta' }, el('span', { class: 'media-meta-text', text: item.deleted_at ? `حُذفت ${formatDateTime(item.deleted_at)}` : '—' }), el('span', { class: item.cleanup_state === 'done' ? 'badge badge-on' : 'badge', text: cleanupLabel })),
+      item.public_cleanup_state !== 'none' ? el('span', { class: publicCleanupPending ? 'badge' : 'badge badge-on', text: publicCleanupLabel }) : null,
+      item.cleanup_error || item.public_cleanup_error ? el('span', { class: 'media-cleanup-hint', text: 'تعذّر تنظيف جزء من الملفات. يمكن إعادة المحاولة.' }) : null,
       el('div', { class: 'media-card-actions' },
-        el('button', {
-          class: 'btn btn-small btn-primary',
-          type: 'button',
-          disabled: busy || item.state !== 'trashed',
-          onClick() { restoreMediaAsset(item); },
-        }, restoring ? 'جارٍ الاسترداد…' : 'استرداد'),
-        needsCleanup
-          ? el('button', {
-            class: 'btn btn-small btn-ghost',
-            type: 'button',
-            disabled: busy,
-            onClick() { cleanupMediaAsset(item); },
-          }, cleaning ? 'جارٍ التنظيف…' : 'إعادة محاولة التنظيف')
-          : null));
+        el('button', { class: 'btn btn-small btn-primary', type: 'button', disabled: busy || item.state !== 'trashed', onClick() { restoreMediaAsset(item); } }, restoring ? 'جارٍ الاسترداد…' : 'استرداد'),
+        needsCleanup ? el('button', { class: 'btn btn-small btn-ghost', type: 'button', disabled: busy || item.state !== 'trashed', onClick() { cleanupMediaAsset(item); } }, cleaning ? 'جارٍ التنظيف…' : 'إعادة محاولة التنظيف') : null,
+        el('button', { class: 'btn btn-small btn-danger-ghost', type: 'button', disabled: busy || item.state === 'restoring', title: item.state === 'purging' ? 'استكمال عملية الحذف النهائي المعلّقة بنفس المعرّف.' : 'حذف نهائي من سلة المهملات فقط. لا يمكن التراجع.', onClick() { purgeMediaAsset(item); } }, item.state === 'purging' ? (purging ? 'جارٍ استكمال الحذف النهائي…' : 'استكمال الحذف النهائي') : (purging ? 'جارٍ الحذف النهائي…' : 'حذف نهائي'))));
   }
 
   function mediaSection(title, items, renderItem) {
@@ -3372,6 +3592,25 @@
     }
 
     page.append(head);
+
+    const pendingPurge = media.purgePending;
+    if (pendingPurge && typeof pendingPurge.operationId === 'string'
+      && OPERATION_ID_RE.test(pendingPurge.operationId)) {
+      page.append(el('section', { class: 'card pad media-purge-pending' },
+        el('h3', { class: 'media-title', text: 'حذف نهائي معلّق' }),
+        el('p', {
+          class: 'group-hint',
+          text: `لم يُؤكَّد حذف «${pendingPurge.name || pendingPurge.path || ''}» نهائيًا. لا يُعلن نجاح قبل اكتمال كل الملفات.`,
+        }),
+        el('button', {
+          class: 'btn btn-small btn-primary',
+          type: 'button',
+          disabled: anyMediaAction() || pendingPurge.confirming === true,
+          onClick() { resumePendingPurge(); },
+        }, pendingPurge.needsVerification
+          ? 'تحقق من الحذف النهائي وإعادة الطلب'
+          : 'استكمال الحذف النهائي')));
+    }
 
     if (media.loading && !media.loaded) {
       page.append(el('div', { class: 'card pad preview-loading', role: 'status' }, 'جارٍ تحميل مكتبة الوسائط…'));
@@ -3561,16 +3800,9 @@
           el('td', { dataset: { label: 'الحالة' } },
             el('span', { class: `badge${isCurrent ? ' badge-on' : ''}`, text: isCurrent ? 'النسخة الحالية' : 'نسخة محفوظة' })),
           el('td', { dataset: { label: 'إجراء' } },
-            el('button', {
-              class: 'btn btn-small btn-ghost restore-btn',
-              type: 'button',
-              disabled: busy || isCurrent,
-              title: isCurrent ? 'هذه هي النسخة المنشورة الحالية' : `استعادة محتوى الإصدار #${entry.version}`,
-              onClick(event) {
-                event.preventDefault();
-                onRestore(entry);
-              },
-            }, 'استعادة')));
+            el('div', { class: 'history-row-actions' },
+              el('button', { class: 'btn btn-small btn-ghost restore-btn', type: 'button', disabled: busy || isCurrent, title: isCurrent ? 'هذه هي النسخة المنشورة الحالية' : `استعادة محتوى الإصدار #${entry.version}`, onClick(event) { event.preventDefault(); onRestore(entry); } }, 'استعادة'),
+              el('button', { class: 'btn btn-small btn-danger-ghost', type: 'button', disabled: busy, title: `حذف نهائي لصف السجل #${entry.version} فقط`, onClick(event) { event.preventDefault(); onDeleteHistoryEntry(entry); } }, `حذف نهائي #${entry.version}`))));
       });
 
       body = el('div', { class: 'table-scroll' },

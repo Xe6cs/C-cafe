@@ -174,3 +174,8 @@
   .modal-foot { justify-content: stretch; }
   .modal-foot .btn { flex: 1 1 140px; }
 }
+
+.history-row-actions{display:flex;gap:.4rem;flex-wrap:wrap;justify-content:flex-start}
+.btn-danger-ghost{color:#b42318;border:1px solid rgba(180,35,24,.25);background:transparent}
+.btn-danger-ghost:hover:not(:disabled){background:rgba(180,35,24,.08)}
+.btn-danger-ghost:disabled{opacity:.55;cursor:not-allowed}

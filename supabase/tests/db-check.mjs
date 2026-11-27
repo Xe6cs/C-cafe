@@ -42,6 +42,7 @@ const MIGRATIONS = [
   'supabase/migrations/20261116090000_analytics_day_cap.sql',
   'supabase/migrations/20261126120000_site_status.sql',
   'supabase/migrations/20261127120000_content_history_clear.sql',
+  'supabase/migrations/20261128120000_media_permanent_delete_and_history_row_delete.sql',
 ];
 
 const ADMIN_ID = '11111111-1111-1111-1111-111111111111';
@@ -90,7 +91,7 @@ if (!PGlite) {
   );
   const seedSql = await readFile(path.join(root, 'supabase', 'seed.sql'), 'utf8');
 
-  async function createDb() {
+  async function createCmsDb() {
     const db = await PGlite.create({ extensions: { pgcrypto } });
 
     // Supabase provides these; the local harness supplies the minimum needed.
@@ -419,6 +420,12 @@ if (!PGlite) {
       [operationId, confirmation],
     );
 
+  const historyDelete = (db, historyId, operationId, confirmation = 'حذف هذه النسخة نهائيًا') =>
+    rpc(db, 'select public.admin_delete_content_history_entry($1::bigint,$2::uuid,$3::text) as result', [historyId, operationId, confirmation]);
+  const mediaPurgeBegin = (db, id, operationId, token = FINALIZE_TOKEN, confirmation = 'حذف الصورة نهائيًا') =>
+    rpc(db, 'select public.admin_media_purge_begin($1::uuid,$2::text,$3::uuid,$4::text) as result', [id, token, operationId, confirmation]);
+  const mediaPurgeCleanup = (db, id, operationId, privateDone, privateError, trashDone, trashError, publicDone = null, publicError = null, token = FINALIZE_TOKEN) =>
+    rpc(db, 'select public.admin_media_purge_cleanup($1::uuid,$2::text,$3::uuid,$4::boolean,$5::text,$6::boolean,$7::text,$8::boolean,$9::text) as result', [id, token, operationId, privateDone, privateError, trashDone, trashError, publicDone, publicError]);
   async function siteStatusRow(db) {
     return (await db.query(
       'select state, message, revision, updated_by from public.site_status where id = 1',
@@ -426,7 +433,7 @@ if (!PGlite) {
   }
 
   test('الزائر وغير المدير لا يستطيعان تنفيذ العمليات الإدارية', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     const sql = 'select public.admin_save_draft(1, $1::uuid, $2::jsonb) as result';
@@ -446,7 +453,7 @@ if (!PGlite) {
   });
 
   test('المستخدم لا يستطيع منح نفسه صلاحية مدير', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     await assert.rejects(
@@ -470,7 +477,7 @@ if (!PGlite) {
   });
 
   test('الجمهور لا يرى المسودة ولا السجل ولا بيانات الإدارة', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     await saveDraft(db, 1, null, contentWith('draft-secret'));
@@ -513,7 +520,7 @@ if (!PGlite) {
   });
 
   test('الكتابة المباشرة التي تتجاوز RPC مرفوضة', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     const writes = [
@@ -540,7 +547,7 @@ if (!PGlite) {
   });
 
   test('تعارض الحفظ والنشر لا يفقد التعديلات ولا يحذف مسودة أحدث', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     const version = (await state(db)).version;
@@ -588,7 +595,7 @@ if (!PGlite) {
   });
 
   test('مراجعة مسودة قديمة تبقى مرفوضة بعد الحذف وإعادة الإنشاء', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     const version = (await state(db)).version;
@@ -619,7 +626,7 @@ if (!PGlite) {
   });
 
   test('إعادة نفس طلب النشر لا تنشئ نسخة إضافية وإعادة استخدام المعرّف بطلب مختلف تُرفض', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     const version = (await state(db)).version;
@@ -651,7 +658,7 @@ if (!PGlite) {
   });
 
   test('الاستعادة تنشئ إصدارًا جديدًا والسجل يحتفظ بآخر 50 نسخة', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     for (let i = 0; i < 52; i += 1) {
@@ -691,7 +698,7 @@ if (!PGlite) {
   });
 
   test('فشل المعاملة لا يترك تغييرات جزئية', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     const before = await state(db);
@@ -734,7 +741,7 @@ if (!PGlite) {
   });
 
   test('حالة الإبطال وفحص الصفحة منفصلان ولا تسبق نتيجة قديمة نتيجة أحدث', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     const beginPurge = await rpc(
@@ -815,7 +822,7 @@ if (!PGlite) {
   });
 
   test('pending media is created only by admins and never selectable', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     await assert.rejects(
@@ -865,7 +872,7 @@ if (!PGlite) {
   });
 
   test('finalize requires the raw server secret, existing bytes, and is retry-safe', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     const created = await mediaCreate(db, 'photo.png', MEDIA_MIME, MEDIA_BYTES);
@@ -969,7 +976,7 @@ if (!PGlite) {
   });
 
   test('failed and abandoned uploads stay failed, idempotently, and approved cannot fail', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     const first = await mediaCreate(db, 'a.png', MEDIA_MIME, MEDIA_BYTES);
@@ -993,7 +1000,7 @@ if (!PGlite) {
   });
 
   test('media rows are readable only by admins and only through approved/own RLS', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     const approved = await createApprovedAsset(db);
@@ -1031,7 +1038,7 @@ if (!PGlite) {
   });
 
   test('Storage policies allow only the creator pending path and block approved overwrite', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     const created = await mediaCreate(db, 'upload.png', MEDIA_MIME, MEDIA_BYTES);
@@ -1099,7 +1106,7 @@ if (!PGlite) {
   });
 
   test('verification claim freezes the object against delete and re-upload', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     const created = await mediaCreate(db, 'frozen.png', MEDIA_MIME, MEDIA_BYTES);
@@ -1138,7 +1145,7 @@ if (!PGlite) {
   });
 
   test('drafts accept approved uploads but reject pending, failed, or forged media refs', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     const approved = await createApprovedAsset(db);
@@ -1171,7 +1178,7 @@ if (!PGlite) {
   });
 
   test('publish requires a ready public copy for every uploaded asset', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     const approved = await createApprovedAsset(db);
@@ -1229,7 +1236,7 @@ if (!PGlite) {
   });
 
   test('public copies require the server secret and stay unreadable until linked', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     const approved = await createApprovedAsset(db);
@@ -1298,7 +1305,7 @@ if (!PGlite) {
   });
 
   test('failed public preparation keeps the published version and draft, and retries recover', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     const approved = await createApprovedAsset(db);
@@ -1335,7 +1342,7 @@ if (!PGlite) {
   });
 
   test('publish preflight retry returns the prior result without another version or copy', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     const { approved } = await createReadyPublicAsset(db);
@@ -1364,7 +1371,7 @@ if (!PGlite) {
   });
 
   test('restoring an older version keeps every published image readable', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     const first = await createReadyPublicAsset(db);
@@ -1407,7 +1414,7 @@ if (!PGlite) {
   });
 
   test('unused approved uploads move through a recoverable trash and back', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     const approved = await createApprovedAsset(db);
@@ -1566,7 +1573,7 @@ if (!PGlite) {
   });
 
   test('deletion is refused while published, draft, or history reference the asset', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     // Published content plus its linked ready public copy.
@@ -1666,7 +1673,7 @@ if (!PGlite) {
   });
 
   test('public cleanup stays pending after failure and restore exposes it before clearing', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     const ready = await createReadyPublicAsset(db);
@@ -1741,7 +1748,7 @@ if (!PGlite) {
   });
 
   test('public bucket admin read policy is limited to staging/failed copies', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     const ready = await createReadyPublicAsset(db);
@@ -1798,7 +1805,7 @@ if (!PGlite) {
   });
 
   test('trash and restore require an admin, the exact server token, and matching operation ids', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     const approved = await createApprovedAsset(db);
@@ -1890,7 +1897,7 @@ if (!PGlite) {
   });
 
   test('trash storage policies allow only the exact allocated name and never delete', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     const approved = await createApprovedAsset(db);
@@ -2000,7 +2007,7 @@ if (!PGlite) {
     rpc(db, 'select public.admin_analytics_snapshot($1::text, $2::text) as result', [env, range]);
 
   test('تحليلات: الإدخال محمي ببصمة السر ويحفظ الحقول المنقّحة فقط', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     const before = Date.now();
@@ -2048,7 +2055,7 @@ if (!PGlite) {
   });
 
   test('تحليلات: بصمة خاطئة أو حقول غير صالحة تُرفض قبل أي كتابة', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     const bad = [
@@ -2085,7 +2092,7 @@ if (!PGlite) {
   });
 
   test('تحليلات: البصمة المخزنة لا تُقبل كبديل عن السر، وقيمة الدالة وحدها تُقبل', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     // The stored value is D2. The Function sends D1. Replaying D2 must fail and
@@ -2101,7 +2108,7 @@ if (!PGlite) {
   });
 
   test('تحليلات: الزائر وغير المدير لا يصلان إلى الجداول أو دوال الإدارة', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     for (const run of [
@@ -2125,7 +2132,7 @@ if (!PGlite) {
   });
 
   test('تحليلات: اللقطة تعزل البيئة وتعيد أحداث الفترة والسابقة واللحظية', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     await analyticsIngest(db, 'preview', analyticsEvent());
@@ -2153,7 +2160,7 @@ if (!PGlite) {
   });
 
   test('تحليلات: المسح يخص بيئة واحدة فقط ولا يمس المحتوى', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     await analyticsIngest(db, 'preview', analyticsEvent());
@@ -2179,7 +2186,7 @@ if (!PGlite) {
   });
 
   test('تحليلات: الحدود المشتركة دقيقة ويومية وتُستهلك حتى مع الرفض', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     // Minute boundary: 119 already used, so one event is accepted and the next
@@ -2219,7 +2226,7 @@ if (!PGlite) {
   });
 
   test('تحليلات: التنظيف المجدول يحتفظ 90 يومًا فقط ولا يُنفَّذ من أدوار API', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     await db.query(
@@ -2252,7 +2259,7 @@ if (!PGlite) {
   });
 
   test('حالة الموقع: الافتراض يعمل والعرض العام يكشف الحالة والرسالة فقط', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     const initial = await readSiteStatus(db);
@@ -2307,7 +2314,7 @@ if (!PGlite) {
   });
 
   test('حالة الموقع: الإيقاف والإعادة لا يلمان المحتوى أو المسودات أو السجل أو الوسائط', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     const contentBefore = await state(db);
@@ -2355,7 +2362,7 @@ if (!PGlite) {
   });
 
   test('حذف سجل المحتوى: رفض anon وغير المدير، وتأكيد صريح مطلوب', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     const op = randomUUID();
@@ -2384,7 +2391,7 @@ if (!PGlite) {
   });
 
   test('حذف سجل المحتوى: يحذف السجل فقط ويحفظ بقية الحالة', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     const draft = await saveDraft(db, 1, null, contentWith('draft-kept'));
@@ -2450,7 +2457,7 @@ if (!PGlite) {
   });
 
   test('حذف سجل المحتوى: السجل الفارغ ناجح وإعادة نفس العملية تعيد نفس النتيجة', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     const op = randomUUID();
@@ -2475,7 +2482,7 @@ if (!PGlite) {
   });
 
   test('حذف سجل المحتوى: إعادة استخدام operation_id بطلب مختلف تُرفض ولا تحذف', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     await publish(db, 1, null, contentWith('v2'), null, randomUUID());
@@ -2523,7 +2530,7 @@ if (!PGlite) {
   });
 
   test('حذف سجل المحتوى: الفشل أثناء الحذف لا يترك حذفًا جزئيًا ولا يسجل نجاحًا مضللًا', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     await publish(db, 1, null, contentWith('v2'), null, randomUUID());
@@ -2572,7 +2579,7 @@ if (!PGlite) {
   });
 
   test('حالة الموقع: التكرار الآمن والتعارض صريحان والرسالة محدودة', async (t) => {
-    const db = await createDb();
+    const db = await createCmsDb();
     t.after(() => db.close());
 
     const operationId = randomUUID();
@@ -2616,4 +2623,246 @@ if (!PGlite) {
     assert.equal(afterReplay.revision, restarted.revision);
     assert.equal(await count(db, 'site_status_operations'), 2);
   });
+  test('single history row delete removes only targeted row and keeps published content', async (t) => {
+    const db = await createCmsDb();
+    t.after(() => db.close());
+
+    for (let i = 0; i < 3; i += 1) {
+      await asAdmin(db, () => publish(db, 1 + i, null, contentWith('v' + (i + 2)), 'n' + (i + 2), randomUUID()));
+    }
+    const before = await historyRows(db);
+    assert.ok(before.length >= 3);
+    const target = before[1];
+    const published = await state(db);
+    const op = randomUUID();
+
+    const res = await asAdmin(db, () => historyDelete(db, Number(target.id), op, 'حذف هذه النسخة نهائيًا'));
+    assert.equal(res.deleted, true);
+    assert.equal(Number(res.history_id), Number(target.id));
+
+    const after = await historyRows(db);
+    assert.equal(after.some((r) => Number(r.id) === Number(target.id)), false);
+    assert.equal(after.length, before.length - 1);
+    const publishedAfter = await state(db);
+    assert.deepEqual(publishedAfter.content, published.content);
+    assert.equal(publishedAfter.version, published.version);
+
+    const replay = await asAdmin(db, () => historyDelete(db, Number(target.id), op, 'حذف هذه النسخة نهائيًا'));
+    assert.deepEqual(replay, res);
+    assert.equal((await historyRows(db)).length, after.length);
+  });
+
+  test('single history row delete rejects visitor/non-admin and invalid confirmation', async (t) => {
+    const db = await createCmsDb();
+    t.after(() => db.close());
+    await asAdmin(db, () => publish(db, 1, null, contentWith('v2'), 'n2', randomUUID()));
+    const row = (await historyRows(db))[0];
+    await assert.rejects(asVisitor(db, () => db.query("select public.admin_delete_content_history_entry($1::bigint,$2::uuid,$3::text) as result", [Number(row.id), randomUUID(), 'حذف هذه النسخة نهائيًا'])), /permission denied|admin access required/);
+    await assert.rejects(asAdmin(db, () => historyDelete(db, Number(row.id), randomUUID(), 'bad')), /confirmation is required/);
+  });
+
+  test('single history row delete reports missing row and does not touch other rows', async (t) => {
+    const db = await createCmsDb();
+    t.after(() => db.close());
+    await asAdmin(db, () => publish(db, 1, null, contentWith('v2'), 'n2', randomUUID()));
+    const before = await count(db, 'content_history');
+    await assert.rejects(asAdmin(db, () => historyDelete(db, 999999, randomUUID())), /history version not found/);
+    assert.equal(await count(db, 'content_history'), before);
+  });
+
+  test('permanent media purge rejects non-admin and succeeds for unused trashed asset', async (t) => {
+    const db = await createCmsDb();
+    t.after(() => db.close());
+
+    const trashed = await createTrashedAsset(db);
+    await assert.rejects(asVisitor(db, () => db.query("select public.admin_media_purge_begin($1::uuid,$2::text,$3::uuid,$4::text) as result", [trashed.approved.id, FINALIZE_TOKEN, randomUUID(), 'حذف الصورة نهائيًا'])), /permission denied|admin access required/);
+
+    const op = randomUUID();
+    const begin = await asAdmin(db, () => mediaPurgeBegin(db, trashed.approved.id, op));
+    assert.equal(begin.state, 'purging');
+    assert.equal(begin.asset_id, trashed.approved.id);
+
+    const replay = await asAdmin(db, () => mediaPurgeBegin(db, trashed.approved.id, op));
+    assert.equal(replay.state, 'purging');
+    assert.equal(replay.idempotent, true);
+
+    const cleanup = await asAdmin(db, () => mediaPurgeCleanup(db, trashed.approved.id, op, true, null, true, null, null, null));
+    assert.equal(cleanup.state, 'purged');
+    assert.equal(await count(db, 'media_assets'), 0);
+    assert.equal(await count(db, 'media_trash'), 0);
+  });
+
+  test('permanent media purge blocks every reference kind and explains where', async (t) => {
+    const db = await createCmsDb();
+    t.after(() => db.close());
+
+    const trashed = await createTrashedAsset(db);
+    const id = trashed.approved.id;
+    const original = (await db.query('select content from public.site_content where id = 1')).rows[0].content;
+    const contentWithRef = (ref) => {
+      const copy = structuredClone(original);
+      copy.hero.big = ref;
+      return copy;
+    };
+    const link = `https://example.supabase.co/storage/v1/object/public/ccafe-public/published/${id}/${MEDIA_SHA}`;
+
+    const setPublished = (ref) => db.query('update public.site_content set content = $1::jsonb where id = 1', [JSON.stringify(contentWithRef(ref))]);
+    const setDraft = (ref) => db.query(
+      `insert into public.draft (id, revision_id, base_version, content, updated_at)
+       values (1, $2::uuid, 1, $1::jsonb, now())
+       on conflict (id) do update set revision_id = excluded.revision_id, content = excluded.content, updated_at = now()`,
+      [JSON.stringify(contentWithRef(ref)), randomUUID()],
+    );
+    const addHistory = (ref) => db.query(
+      'insert into public.content_history (version, content, note) values (900001, $1::jsonb, $2::text)',
+      [JSON.stringify(contentWithRef(ref)), 'legacy reference'],
+    );
+    const clearRefs = async () => {
+      await db.query('update public.site_content set content = $1::jsonb where id = 1', [JSON.stringify(original)]);
+      await db.query('delete from public.draft where id = 1');
+      await db.query('delete from public.content_history where version = 900001');
+    };
+
+    const cases = [
+      ['published', 'published', trashed.approved.logical_path, setPublished],
+      ['draft', 'draft', trashed.approved.logical_path, setDraft],
+      ['restorable history', 'history', trashed.approved.logical_path, addHistory],
+      ['bare asset id', 'draft', id, setDraft],
+      ['public link', 'draft', link, setDraft],
+    ];
+
+    try {
+      for (const [label, reason, ref, apply] of cases) {
+        await apply(ref);
+        const blocked = await asAdmin(db, () => mediaPurgeBegin(db, id, randomUUID()));
+        assert.equal(blocked.state, 'blocked', label);
+        assert.ok(blocked.reasons.includes(reason), `${label}: expected ${reason}, got ${JSON.stringify(blocked.reasons)}`);
+        assert.equal(
+          (await db.query('select status from public.media_assets where id = $1', [id])).rows[0].status,
+          'trashed',
+          `${label}: a blocked purge must not change the asset`,
+        );
+        assert.equal(await count(db, 'media_purge'), 0, `${label}: a blocked purge must not create a purge record`);
+        await clearRefs();
+      }
+    } finally {
+      await clearRefs();
+    }
+  });
+
+  test('permanent media purge keeps cleanup data until every target is confirmed and stays replayable', async (t) => {
+    const db = await createCmsDb();
+    t.after(() => db.close());
+
+    const trashed = await createTrashedAsset(db);
+    const op = randomUUID();
+    const begin = await asAdmin(db, () => mediaPurgeBegin(db, trashed.approved.id, op));
+    assert.equal(begin.state, 'purging');
+
+    const partial = await asAdmin(db, () => mediaPurgeCleanup(db, trashed.approved.id, op, true, null, false, 'storage error'));
+    assert.equal(partial.state, 'purging');
+    assert.equal(partial.private_cleanup_state, 'done');
+    assert.equal(partial.trash_cleanup_state, 'pending');
+    assert.equal(await count(db, 'media_assets'), 1, 'no DB row may be removed before every target is confirmed');
+    assert.equal(await count(db, 'media_trash'), 1);
+    assert.equal(await count(db, 'media_purge'), 1);
+
+    const complete = await asAdmin(db, () => mediaPurgeCleanup(db, trashed.approved.id, op, true, null, true, null));
+    assert.equal(complete.state, 'purged');
+    assert.equal(await count(db, 'media_assets'), 0);
+    assert.equal(await count(db, 'media_trash'), 0);
+    const durable = (await db.query('select state, private_cleanup_state, trash_cleanup_state from public.media_purge where operation_id = $1', [op])).rows[0];
+    assert.equal(durable.state, 'purged');
+    assert.equal(durable.private_cleanup_state, 'done');
+    assert.equal(durable.trash_cleanup_state, 'done');
+
+    const replay = await asAdmin(db, () => mediaPurgeBegin(db, trashed.approved.id, op));
+    assert.equal(replay.state, 'purged');
+    assert.equal(replay.idempotent, true);
+    const cleanupReplay = await asAdmin(db, () => mediaPurgeCleanup(db, trashed.approved.id, op, true, null, true, null));
+    assert.equal(cleanupReplay.state, 'purged');
+    assert.equal(cleanupReplay.idempotent, true);
+    assert.equal(await count(db, 'media_purge'), 1, 'replay must not create another purge record');
+  });
+
+  test('an old purge operation id never purges a different trashed asset', async (t) => {
+    const db = await createCmsDb();
+    t.after(() => db.close());
+
+    const first = await createTrashedAsset(db);
+    const second = await createTrashedAsset(db);
+    const op = randomUUID();
+    const begun = await asAdmin(db, () => mediaPurgeBegin(db, first.approved.id, op));
+    assert.equal(begun.state, 'purging');
+
+    await assert.rejects(
+      asAdmin(db, () => mediaPurgeBegin(db, second.approved.id, op)),
+      /operation id was reused|already in progress/,
+    );
+    assert.equal(
+      (await db.query('select status from public.media_assets where id = $1', [second.approved.id])).rows[0].status,
+      'trashed',
+      'the unrelated asset must remain untouched',
+    );
+    assert.equal(await count(db, 'media_purge'), 1);
+  });
+
+  test('purge storage policies are admin-only and limited to the exact operation paths', async (t) => {
+    const db = await createCmsDb();
+    t.after(() => db.close());
+
+    const trashed = await createTrashedAsset(db);
+    const other = await createTrashedAsset(db);
+    const op = randomUUID();
+    const begun = await asAdmin(db, () => mediaPurgeBegin(db, trashed.approved.id, op));
+    assert.equal(begun.state, 'purging');
+    const privatePath = begun.private_object_path;
+    const trashPath = begun.trash_object_path;
+
+    const exactPaths = (client) => client.query(
+      `select bucket_id, name from storage.objects
+       where (bucket_id = 'ccafe-media' and name = $1)
+          or (bucket_id = 'ccafe-trash' and name = $2)`,
+      [privatePath, trashPath],
+    );
+    const adminRows = await asAdmin(db, () => exactPaths(db));
+    assert.equal(adminRows.rows.length, 2, 'an admin must be able to read only the recorded purge paths');
+
+    const userRows = await asUser(db, () => exactPaths(db));
+    assert.equal(userRows.rows.length, 0, 'a non-admin must never read purge paths');
+    await assert.rejects(
+      asVisitor(db, () => exactPaths(db)),
+      /permission denied/,
+      'a visitor must never read purge paths',
+    );
+
+    const userDelete = await asUser(db, () => db.query(
+      "delete from storage.objects where bucket_id = 'ccafe-trash' and name = $1 returning name",
+      [trashPath],
+    ));
+    assert.equal(userDelete.rows.length, 0, 'a non-admin must never delete purge paths');
+    await assert.rejects(
+      asVisitor(db, () => db.query(
+        "delete from storage.objects where bucket_id = 'ccafe-trash' and name = $1 returning name",
+        [trashPath],
+      )),
+      /permission denied/,
+      'a visitor must never delete purge paths',
+    );
+
+    // The trash bucket had no application DELETE policy before purge; the new
+    // policy must not widen it to a different asset's trash object.
+    const unrelatedDelete = await asAdmin(db, () => db.query(
+      "delete from storage.objects where bucket_id = 'ccafe-trash' and name = $1 returning name",
+      [other.begun.object_path],
+    ));
+    assert.equal(unrelatedDelete.rows.length, 0, 'purge delete must not reach another asset');
+
+    const purgeDelete = await asAdmin(db, () => db.query(
+      "delete from storage.objects where bucket_id = 'ccafe-trash' and name = $1 returning name",
+      [trashPath],
+    ));
+    assert.equal(purgeDelete.rows.length, 1, 'the exact recorded purge path must be deletable by an admin');
+  });
+
 }

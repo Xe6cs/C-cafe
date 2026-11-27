@@ -90,6 +90,8 @@ const ROUTES = new Map([
   ['/api/admin/media/delete', ['POST']],
   ['/api/admin/media/restore', ['POST']],
   ['/api/admin/media/cleanup', ['POST']],
+  ['/api/admin/media/purge', ['POST']],
+  ['/api/admin/history/delete', ['POST']],
 ]);
 
 const BASE_HEADERS = {
@@ -1184,6 +1186,31 @@ async function downloadTrashObject(config, token, path) {
 // Write the restored bytes back to the exact original private name. There is no
 // UPDATE policy, so an existing object reports 409; the caller re-reads it and
 // verifies those bytes instead of replacing them.
+async function deleteTrashObject(config, token, path) {
+  if (!TRASH_PATH_RE.test(path)) return false;
+  let response;
+  try {
+    response = await fetchWithTimeout(trashObjectUrl(config, path), {
+      method: 'DELETE',
+      redirect: 'manual',
+      headers: {
+        apikey: config.anonKey,
+        Authorization: `Bearer ${token}`,
+      },
+    }, 8000);
+  } catch {
+    return false;
+  }
+  if (response.ok) return true;
+  if (response.status === 404) return true;
+  if (response.status === 400) {
+    try {
+      const body = await response.json();
+      if (body && (body.error === 'not_found' || body.statusCode === '404')) return true;
+    } catch {}
+  }
+  return false;
+}
 async function uploadMediaObject(config, token, path, mime, buffer) {
   if (!MEDIA_PATH_RE.test(path)) return { ok: false, reason: 'invalid' };
   if (!Buffer.isBuffer(buffer) || buffer.length < 1) return { ok: false, reason: 'invalid' };
@@ -1341,7 +1368,7 @@ function trashListItem(value) {
   if (value.width < 1 || value.height < 1
     || value.width > MEDIA_MAX_DIMENSION || value.height > MEDIA_MAX_DIMENSION) return null;
   if (typeof value.original_name !== 'string') return null;
-  if (value.state !== 'trashed' && value.state !== 'restoring') return null;
+  if (value.state !== 'trashed' && value.state !== 'restoring' && value.state !== 'purging') return null;
   if (value.cleanup_state !== 'pending' && value.cleanup_state !== 'done') return null;
   if (value.public_cleanup_state !== undefined
     && value.public_cleanup_state !== 'none'
@@ -1357,6 +1384,10 @@ function trashListItem(value) {
     height: value.height,
     deleted_at: typeof value.deleted_at === 'string' ? value.deleted_at : null,
     state: value.state,
+    purge_operation_id: typeof value.purge_operation_id === 'string'
+      && UUID_RE.test(value.purge_operation_id)
+      ? value.purge_operation_id
+      : null,
     cleanup_state: value.cleanup_state,
     cleanup_error: typeof value.cleanup_error === 'string' ? value.cleanup_error.slice(0, 200) : null,
     public_cleanup_state: value.public_cleanup_state === 'pending' || value.public_cleanup_state === 'done'
@@ -1765,6 +1796,68 @@ function parseHistoryClearBody(event) {
   };
 }
 
+
+function parseHistoryDeleteBody(event) {
+  const body = bodyText(event);
+  if (!body.ok) return body;
+
+  let data;
+  try {
+    data = JSON.parse(body.value);
+  } catch {
+    return { ok: false, reason: 'invalid' };
+  }
+  if (!isPlainObject(data)) return { ok: false, reason: 'invalid' };
+
+  if (!Number.isSafeInteger(data.history_id) || data.history_id < 1) {
+    return { ok: false, reason: 'invalid' };
+  }
+  if (typeof data.operation_id !== 'string' || !UUID_RE.test(data.operation_id)) {
+    return { ok: false, reason: 'invalid' };
+  }
+  if (data.confirmation !== 'حذف هذه النسخة نهائيًا') {
+    return { ok: false, reason: 'invalid' };
+  }
+
+  return {
+    ok: true,
+    value: {
+      history_id: data.history_id,
+      operation_id: data.operation_id,
+      confirmation: data.confirmation,
+    },
+  };
+}
+
+function parseMediaPurgeBody(event) {
+  const body = bodyText(event);
+  if (!body.ok) return body;
+
+  let data;
+  try {
+    data = JSON.parse(body.value);
+  } catch {
+    return { ok: false, reason: 'invalid' };
+  }
+  if (!isPlainObject(data)) return { ok: false, reason: 'invalid' };
+  if (typeof data.asset_id !== 'string' || !UUID_RE.test(data.asset_id)) {
+    return { ok: false, reason: 'invalid' };
+  }
+  if (typeof data.operation_id !== 'string' || !UUID_RE.test(data.operation_id)) {
+    return { ok: false, reason: 'invalid' };
+  }
+  if (data.confirmation !== 'حذف الصورة نهائيًا') {
+    return { ok: false, reason: 'invalid' };
+  }
+  return {
+    ok: true,
+    value: {
+      asset_id: data.asset_id,
+      operation_id: data.operation_id,
+      confirmation: data.confirmation,
+    },
+  };
+}
 function parseMediaCreateBody(event) {
   const body = bodyText(event);
   if (!body.ok) return body;
@@ -2161,6 +2254,48 @@ async function handle(event) {
       boundary_version: value.boundary_version,
       boundary_id: value.boundary_id,
       cleared_at: value.cleared_at,
+    });
+  }
+
+  if (pathname === '/api/admin/history/delete') {
+    const parsed = parseHistoryDeleteBody(event);
+    if (!parsed.ok) {
+      if (parsed.reason === 'too_large') return jsonResponse(413, { error: 'payload_too_large' });
+      return jsonResponse(400, { error: 'invalid_request' });
+    }
+
+    const result = await callRpc(config, token, 'admin_delete_content_history_entry', {
+      p_history_id: parsed.value.history_id,
+      p_operation_id: parsed.value.operation_id,
+      p_confirmation: parsed.value.confirmation,
+    });
+    if (!result.ok) {
+      if (result.reason === 'unauthorized') return jsonResponse(401, { error: 'unauthorized' });
+      if (result.reason === 'forbidden') return jsonResponse(403, { error: 'forbidden' });
+      if (result.reason === 'conflict') return jsonResponse(409, { error: 'conflict' });
+      if (result.reason === 'not_found') return jsonResponse(404, { error: 'not_found' });
+      if (result.reason === 'invalid') return jsonResponse(422, { error: 'invalid_request' });
+      return jsonResponse(502, { error: 'upstream_unavailable' });
+    }
+
+    const value = result.value;
+    if (!isPlainObject(value)
+      || value.operation_id !== parsed.value.operation_id
+      || value.history_id !== parsed.value.history_id
+      || !Number.isSafeInteger(value.version)
+      || value.version < 1
+      || value.deleted !== true
+      || typeof value.deleted_at !== 'string') {
+      return jsonResponse(502, { error: 'upstream_unavailable' });
+    }
+
+    return jsonResponse(200, {
+      operation_id: value.operation_id,
+      history_id: value.history_id,
+      version: value.version,
+      deleted: true,
+      was_current_published_version: value.was_current_published_version === true,
+      deleted_at: value.deleted_at,
     });
   }
 
@@ -2915,6 +3050,124 @@ async function handle(event) {
         selectable: true,
       },
       idempotent: finished.value.idempotent === true,
+    });
+  }
+
+  if (pathname === '/api/admin/media/purge') {
+    const tokenValue = mediaFinalizeToken();
+    if (!tokenValue) return jsonResponse(503, { error: 'media_unavailable' });
+
+    const parsed = parseMediaPurgeBody(event);
+    if (!parsed.ok) {
+      if (parsed.reason === 'too_large') return jsonResponse(413, { error: 'payload_too_large' });
+      return jsonResponse(400, { error: 'invalid_request' });
+    }
+
+    const begun = await callRpc(config, token, 'admin_media_purge_begin', {
+      p_asset_id: parsed.value.asset_id,
+      p_token: tokenValue,
+      p_operation_id: parsed.value.operation_id,
+      p_confirmation: parsed.value.confirmation,
+    });
+    if (!begun.ok) return mediaRpcFailure(begun.reason);
+    if (!isPlainObject(begun.value)) return jsonResponse(502, { error: 'upstream_unavailable' });
+
+    const v = begun.value;
+    if (v.state === 'blocked') {
+      return jsonResponse(409, {
+        error: 'media_in_use',
+        reasons: Array.isArray(v.reasons) ? v.reasons.filter((r) => typeof r === 'string') : [],
+        references: isPlainObject(v.references) ? v.references : {},
+        asset_id: parsed.value.asset_id,
+      });
+    }
+    if (v.state === 'purged' && v.operation_id === parsed.value.operation_id) {
+      return jsonResponse(200, {
+        asset: {
+          id: parsed.value.asset_id,
+          logical_path: typeof v.logical_path === 'string' ? v.logical_path : `media/${parsed.value.asset_id}`,
+          status: 'purged',
+          private_cleanup_state: 'done',
+          trash_cleanup_state: 'done',
+          public_cleanup_state: typeof v.public_cleanup_state === 'string' ? v.public_cleanup_state : 'none',
+        },
+        idempotent: true,
+      });
+    }
+    if (v.state !== 'purging' || v.operation_id !== parsed.value.operation_id) {
+      return jsonResponse(502, { error: 'upstream_unavailable' });
+    }
+
+    // Only the exact paths recorded for this operation may be deleted. The RPC
+    // derives them from the asset row, but validate again here so a stale or
+    // unexpected response can never widen the Storage scope to another asset.
+    const expectedPrivatePath = `media/${parsed.value.asset_id}`;
+    const privatePath = v.private_object_path === expectedPrivatePath ? expectedPrivatePath : null;
+    const trashPath = typeof v.trash_object_path === 'string'
+      && v.trash_object_path.startsWith(`trash/${parsed.value.asset_id}/`)
+      && TRASH_PATH_RE.test(v.trash_object_path) ? v.trash_object_path : null;
+    const publicPath = typeof v.public_object_path === 'string'
+      && v.public_object_path.startsWith(`published/${parsed.value.asset_id}/`)
+      && PUBLIC_MEDIA_PATH_RE.test(v.public_object_path) ? v.public_object_path : null;
+    if (!privatePath || !trashPath) return jsonResponse(502, { error: 'upstream_unavailable' });
+
+    const privateDone = v.private_cleanup_state === 'done' ? true : await deleteMediaObject(config, token, privatePath);
+    const trashDone = v.trash_cleanup_state === 'done' ? true : await deleteTrashObject(config, token, trashPath);
+    let publicDone = null;
+    let publicError = null;
+    if (publicPath) {
+      if (v.public_cleanup_state === 'done') {
+        publicDone = true;
+      } else {
+        publicDone = await deletePublicObject(config, token, publicPath);
+        publicError = publicDone ? null : 'public_object_delete_failed';
+      }
+    }
+
+    const recorded = await callRpc(config, token, 'admin_media_purge_cleanup', {
+      p_asset_id: parsed.value.asset_id,
+      p_token: tokenValue,
+      p_operation_id: parsed.value.operation_id,
+      p_private_done: privateDone,
+      p_private_error: privateDone ? null : 'object_delete_failed',
+      p_trash_done: trashDone,
+      p_trash_error: trashDone ? null : 'trash_object_delete_failed',
+      p_public_done: publicDone,
+      p_public_error: publicError,
+    });
+    if (!recorded.ok || !isPlainObject(recorded.value)) {
+      if (privateDone && trashDone && (publicDone === true || publicDone === null)) {
+        return jsonResponse(502, { error: 'cleanup_pending' });
+      }
+      return jsonResponse(502, { error: 'storage_unavailable' });
+    }
+
+    const rv = recorded.value;
+    const state = rv.state === 'purged' ? 'purged' : 'purging';
+    if (state !== 'purged') {
+      return jsonResponse(502, {
+        error: 'cleanup_pending',
+        asset: {
+          id: parsed.value.asset_id,
+          logical_path: typeof rv.logical_path === 'string' ? rv.logical_path : `media/${parsed.value.asset_id}`,
+          status: 'purging',
+          private_cleanup_state: rv.private_cleanup_state === 'done' ? 'done' : 'pending',
+          trash_cleanup_state: rv.trash_cleanup_state === 'done' ? 'done' : 'pending',
+          public_cleanup_state: rv.public_cleanup_state === 'done' ? 'done' : rv.public_cleanup_state === 'pending' ? 'pending' : 'none',
+        },
+      });
+    }
+
+    return jsonResponse(200, {
+      asset: {
+        id: parsed.value.asset_id,
+        logical_path: typeof rv.logical_path === 'string' ? rv.logical_path : `media/${parsed.value.asset_id}`,
+        status: 'purged',
+        private_cleanup_state: 'done',
+        trash_cleanup_state: 'done',
+        public_cleanup_state: rv.public_cleanup_state === 'done' ? 'done' : 'none',
+      },
+      idempotent: rv.idempotent === true,
     });
   }
 

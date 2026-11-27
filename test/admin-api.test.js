@@ -191,7 +191,7 @@ function configure() {
   delete process.env.CCAFE_VERIFY_ORIGIN;
   delete process.env.DEPLOY_PRIME_URL;
   delete process.env.URL;
-  delete process.env.CCAFE_MEDIA_FINALIZE_TOKEN;
+  process.env.CCAFE_MEDIA_FINALIZE_TOKEN = 'test-token-1234567890-abcdefghijklmnopqrstuvwxyz';
   delete process.env.CCAFE_ANALYTICS_ENV;
 }
 
@@ -262,6 +262,12 @@ function installFetch(routes) {
   return calls;
 }
 
+function storageDeleteUrls(calls) {
+  return calls
+    .filter((entry) => entry.init.method === 'DELETE' && String(entry.url).includes('/storage/v1/object/'))
+    .map((entry) => String(entry.url));
+}
+
 function adminRoutes(overrides = {}) {
   return [
     { match: '/auth/v1/user', reply: overrides.user || reply({ id: USER_ID, email: 'admin@example.com' }) },
@@ -282,6 +288,8 @@ function adminRoutes(overrides = {}) {
     },
     ...(overrides.publishRpc ? [{ match: '/rest/v1/rpc/admin_publish', reply: overrides.publishRpc }] : []),
     ...(overrides.restoreRpc ? [{ match: '/rest/v1/rpc/admin_restore', reply: overrides.restoreRpc }] : []),
+    ...(overrides.historyClear ? [{ match: '/rest/v1/rpc/admin_clear_content_history', reply: overrides.historyClear }] : []),
+    ...(overrides.historyDelete ? [{ match: '/rest/v1/rpc/admin_delete_content_history_entry', reply: overrides.historyDelete }] : []),
     ...(overrides.beginCheck ? [{ match: '/rest/v1/rpc/admin_begin_public_check', reply: overrides.beginCheck }] : []),
     ...(overrides.finishCheck ? [{ match: '/rest/v1/rpc/admin_finish_public_check', reply: overrides.finishCheck }] : []),
     ...(overrides.siteStatus ? [{ match: '/rest/v1/rpc/admin_site_status', reply: overrides.siteStatus }] : []),
@@ -305,6 +313,8 @@ function adminRoutes(overrides = {}) {
     },
     ...(overrides.mediaFinalize ? [{ match: '/rest/v1/rpc/admin_media_finalize', reply: overrides.mediaFinalize }] : []),
     ...(overrides.mediaFail ? [{ match: '/rest/v1/rpc/admin_media_fail', reply: overrides.mediaFail }] : []),
+    ...(overrides.mediaPurgeBegin ? [{ match: '/rest/v1/rpc/admin_media_purge_begin', reply: overrides.mediaPurgeBegin }] : []),
+    ...(overrides.mediaPurgeCleanup ? [{ match: '/rest/v1/rpc/admin_media_purge_cleanup', reply: overrides.mediaPurgeCleanup }] : []),
     {
       match: '/rest/v1/rpc/admin_media_publish_begin',
       reply: overrides.publishBegin || publishBeginReply(),
@@ -1717,6 +1727,7 @@ test('finalize refuses another admin asset, non-uuid ids, and unconfigured serve
   }
 
   configure();
+  delete process.env.CCAFE_MEDIA_FINALIZE_TOKEN;
   calls = installFetch(adminRoutes({}));
   try {
     const result = await handler(adminEvent('/api/admin/media/finalize', 'POST', TOKEN, { asset_id: ASSET_ID }));
@@ -2539,6 +2550,42 @@ test('media usage and trash list return sanitized admin summaries', async () => 
   }
 });
 
+test('trash list exposes a valid purging operation id for a later resume', async () => {
+  configure();
+  process.env.CCAFE_MEDIA_FINALIZE_TOKEN = FINALIZE_TOKEN;
+  const media = await sampleMedia();
+  const operationId = '77777777-7777-4777-8777-777777777777';
+  installFetch(adminRoutes({
+    mediaTrashList: reply({
+      items: [{
+        asset_id: ASSET_ID,
+        logical_path: ASSET_PATH,
+        original_name: 'photo.png',
+        mime: 'image/png',
+        bytes: media.bytes,
+        width: 2,
+        height: 2,
+        deleted_at: '2026-11-12T10:00:00+00:00',
+        state: 'purging',
+        purge_operation_id: operationId,
+        cleanup_state: 'done',
+        public_cleanup_state: 'none',
+      }],
+    }),
+  }));
+
+  try {
+    const result = await handler(adminEvent('/api/admin/media/trash'));
+    assert.equal(result.statusCode, 200);
+    const body = JSON.parse(result.body);
+    assert.equal(body.items.length, 1);
+    assert.equal(body.items[0].state, 'purging');
+    assert.equal(body.items[0].purge_operation_id, operationId);
+  } finally {
+    restore();
+  }
+});
+
 test('media delete aborts and leaves the asset approved when bytes cannot be copied', async () => {
   configure();
   process.env.CCAFE_MEDIA_FINALIZE_TOKEN = FINALIZE_TOKEN;
@@ -2830,6 +2877,7 @@ test('media delete and restore reject malformed requests and missing server conf
   }
 
   configure();
+  delete process.env.CCAFE_MEDIA_FINALIZE_TOKEN;
   calls = installFetch(adminRoutes({}));
   try {
     const blocked = await handler(adminEvent('/api/admin/media/delete', 'POST', TOKEN, {
@@ -3055,6 +3103,317 @@ test('history clear maps admin, conflict, and invalid upstream errors', async ()
       confirmation: 'حذف السجل نهائيًا',
     }));
     assert.equal(invalid.statusCode, 422);
+  } finally {
+    restore();
+  }
+});
+
+
+test('history delete request rejects invalid bodies and maps rpc', async () => {
+  configure();
+  const operationId = '77777777-7777-4777-8777-777777777777';
+  const calls = installFetch(adminRoutes({
+    historyDelete: (req) => { return reply({
+        operation_id: operationId,
+        history_id: 12,
+        version: 259,
+        deleted: true,
+        was_current_published_version: false,
+        deleted_at: '2026-11-27T12:00:00Z',
+      });
+    },
+  }));
+  try {
+    for (const body of [
+      { history_id: 12, operation_id: operationId, confirmation: 'wrong' },
+      { history_id: 0, operation_id: operationId, confirmation: 'حذف هذه النسخة نهائيًا' },
+      { history_id: 12, operation_id: 'bad', confirmation: 'حذف هذه النسخة نهائيًا' },
+    ]) {
+      const result = await handler(adminEvent('/api/admin/history/delete', 'POST', TOKEN, body));
+      assert.equal(result.statusCode, 400);
+    }
+    const rpcBefore = calls.filter((c)=>String(c.url).includes('/rpc/admin_delete_content_history_entry')).length;
+    const ok = await handler(adminEvent('/api/admin/history/delete', 'POST', TOKEN, {
+      history_id: 12, operation_id: operationId, confirmation: 'حذف هذه النسخة نهائيًا',
+    }));
+    assert.equal(ok.statusCode, 200);
+    const body = JSON.parse(ok.body);
+    assert.equal(body.history_id, 12);
+    assert.equal(body.deleted, true);
+    const rpcAfter = calls.filter((c)=>String(c.url).includes('/rpc/admin_delete_content_history_entry')).length;
+    assert.ok(rpcAfter > rpcBefore);
+  } finally {
+    restore();
+  }
+});
+
+test('history delete maps not_found/conflict', async () => {
+  configure();
+  const operationId = '77777777-7777-4777-8777-777777777778';
+  try {
+    installFetch(adminRoutes({ historyDelete: reply({ code: 'P0002', message: 'missing' }, 404) }));
+    let r = await handler(adminEvent('/api/admin/history/delete', 'POST', TOKEN, { history_id: 1, operation_id: operationId, confirmation: 'حذف هذه النسخة نهائيًا' }));
+    assert.equal(r.statusCode, 404);
+
+    installFetch(adminRoutes({ historyDelete: reply({ code: 'PT409', message: 'conflict' }, 409) }));
+    r = await handler(adminEvent('/api/admin/history/delete', 'POST', TOKEN, { history_id: 1, operation_id: operationId, confirmation: 'حذف هذه النسخة نهائيًا' }));
+    assert.equal(r.statusCode, 409);
+  } finally {
+    restore();
+  }
+});
+
+test('media purge blocks when usage is still present', async () => {
+  configure();
+  const operationId = '88888888-8888-4888-8888-888888888888';
+  const assetId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  installFetch(adminRoutes({
+    mediaPurgeBegin: reply({ state: 'blocked', asset_id: assetId, reasons: ['published'], references: { published: true, draft: false, history_count: 0 } }),
+  }));
+  try {
+    const result = await handler(adminEvent('/api/admin/media/purge', 'POST', TOKEN, { asset_id: assetId, operation_id: operationId, confirmation: 'حذف الصورة نهائيًا' }));
+    assert.equal(result.statusCode, 409);
+    assert.deepEqual(JSON.parse(result.body).reasons, ['published']);
+  } finally {
+    restore();
+  }
+});
+
+test('media purge returns cleanup_pending when storage delete cannot be confirmed', async () => {
+  configure();
+  const operationId = '88888888-8888-4888-8888-888888888889';
+  const assetId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab';
+  const trashPath = `trash/${assetId}/${'b'.repeat(64)}`;
+  installFetch(adminRoutes({
+    mediaPurgeBegin: reply({
+      state: 'purging', operation_id: operationId, asset_id: assetId,
+      logical_path: `media/${assetId}`, original_name: 'x.png',
+      private_object_path: `media/${assetId}`, trash_object_path: trashPath,
+      public_object_path: null, private_cleanup_state: 'pending', trash_cleanup_state: 'pending', public_cleanup_state: 'none',
+    }),
+    mediaPurgeCleanup: reply({
+      state: 'purging', asset_id: assetId, logical_path: `media/${assetId}`,
+      private_cleanup_state: 'pending', trash_cleanup_state: 'pending', public_cleanup_state: 'none',
+      operation_id: operationId, idempotent: false,
+    }),
+  }));
+  try {
+    const result = await handler(adminEvent('/api/admin/media/purge', 'POST', TOKEN, { asset_id: assetId, operation_id: operationId, confirmation: 'حذف الصورة نهائيًا' }));
+    assert.equal(result.statusCode, 502);
+    assert.equal(JSON.parse(result.body).error, 'cleanup_pending');
+  } finally {
+    restore();
+  }
+});
+
+test('media purge fails after one storage delete and resumes with the same operation id', async () => {
+  configure();
+  const operationId = '88888888-8888-4888-8888-88888888888a';
+  const assetId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaac';
+  const privatePath = `media/${assetId}`;
+  const trashPath = `trash/${assetId}/${'b'.repeat(64)}`;
+  const state = {
+    privateDone: false,
+    trashDone: false,
+    trashAttempts: 0,
+    cleanupRequests: [],
+    deletedUrls: [],
+  };
+  const beginReply = () => reply({
+    state: 'purging', operation_id: operationId, asset_id: assetId,
+    logical_path: privatePath, original_name: 'x.png',
+    private_object_path: privatePath, trash_object_path: trashPath, public_object_path: null,
+    private_cleanup_state: state.privateDone ? 'done' : 'pending',
+    trash_cleanup_state: state.trashDone ? 'done' : 'pending',
+    public_cleanup_state: 'none',
+  });
+  const cleanupHandler = (_url, init) => {
+    const request = JSON.parse(init.body);
+    state.cleanupRequests.push(request);
+    state.privateDone = state.privateDone || request.p_private_done === true;
+    state.trashDone = state.trashDone || request.p_trash_done === true;
+    const done = state.privateDone && state.trashDone;
+    return reply({
+      state: done ? 'purged' : 'purging', asset_id: assetId, logical_path: privatePath,
+      private_cleanup_state: state.privateDone ? 'done' : 'pending',
+      trash_cleanup_state: state.trashDone ? 'done' : 'pending',
+      public_cleanup_state: 'none', operation_id: operationId, idempotent: false,
+    });
+  };
+  const calls = installFetch([
+    ...adminRoutes({
+      mediaPurgeBegin: () => beginReply(),
+      mediaPurgeCleanup: cleanupHandler,
+    }),
+    {
+      match: `/storage/v1/object/ccafe-media/${privatePath}`,
+      handler: () => {
+        state.deletedUrls.push(`private`);
+        return reply({});
+      },
+    },
+    {
+      match: `/storage/v1/object/ccafe-trash/${trashPath}`,
+      handler: () => {
+        state.trashAttempts += 1;
+        state.deletedUrls.push(`trash`);
+        return state.trashAttempts === 1 ? reply({ error: 'storage_failure' }, 500) : reply({});
+      },
+    },
+  ]);
+  try {
+    const body = { asset_id: assetId, operation_id: operationId, confirmation: 'حذف الصورة نهائيًا' };
+    const first = await handler(adminEvent('/api/admin/media/purge', 'POST', TOKEN, body));
+    assert.equal(first.statusCode, 502);
+    assert.equal(JSON.parse(first.body).error, 'cleanup_pending');
+    assert.deepEqual(state.deletedUrls, ['private', 'trash']);
+    assert.equal(state.cleanupRequests.length, 1);
+    assert.equal(state.cleanupRequests[0].p_private_done, true);
+    assert.equal(state.cleanupRequests[0].p_trash_done, false);
+
+    const retry = await handler(adminEvent('/api/admin/media/purge', 'POST', TOKEN, body));
+    assert.equal(retry.statusCode, 200);
+    assert.equal(JSON.parse(retry.body).asset.status, 'purged');
+    assert.deepEqual(state.deletedUrls, ['private', 'trash', 'trash']);
+    assert.equal(state.cleanupRequests.length, 2);
+    assert.equal(state.cleanupRequests[1].p_private_done, true);
+    assert.equal(state.cleanupRequests[1].p_trash_done, true);
+    assert.deepEqual(storageDeleteUrls(calls), [
+      `https://example.supabase.co/storage/v1/object/ccafe-media/${privatePath}`,
+      `https://example.supabase.co/storage/v1/object/ccafe-trash/${trashPath}`,
+      `https://example.supabase.co/storage/v1/object/ccafe-trash/${trashPath}`,
+    ]);
+  } finally {
+    restore();
+  }
+});
+
+test('media purge retry after a lost cleanup response does not delete again', async () => {
+  configure();
+  const operationId = '88888888-8888-4888-8888-88888888888b';
+  const assetId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaad';
+  const privatePath = `media/${assetId}`;
+  const trashPath = `trash/${assetId}/${'b'.repeat(64)}`;
+  const state = { cleanupCompleted: false, cleanupCalls: 0 };
+  const calls = installFetch([
+    ...adminRoutes({
+      mediaPurgeBegin: () => reply(state.cleanupCompleted ? {
+        state: 'purged', operation_id: operationId, asset_id: assetId,
+        logical_path: privatePath, original_name: 'x.png',
+        private_object_path: privatePath, trash_object_path: trashPath, public_object_path: null,
+        private_cleanup_state: 'done', trash_cleanup_state: 'done', public_cleanup_state: 'none',
+        operation_id: operationId,
+      } : {
+        state: 'purging', operation_id: operationId, asset_id: assetId,
+        logical_path: privatePath, original_name: 'x.png',
+        private_object_path: privatePath, trash_object_path: trashPath, public_object_path: null,
+        private_cleanup_state: 'pending', trash_cleanup_state: 'pending', public_cleanup_state: 'none',
+      }),
+      mediaPurgeCleanup: () => {
+        state.cleanupCalls += 1;
+        state.cleanupCompleted = true;
+        throw new Error('response lost after cleanup completed');
+      },
+    }),
+    { match: `/storage/v1/object/ccafe-media/${privatePath}`, reply: reply({}) },
+    { match: `/storage/v1/object/ccafe-trash/${trashPath}`, reply: reply({}) },
+  ]);
+  try {
+    const body = { asset_id: assetId, operation_id: operationId, confirmation: 'حذف الصورة نهائيًا' };
+    const first = await handler(adminEvent('/api/admin/media/purge', 'POST', TOKEN, body));
+    assert.equal(first.statusCode, 502);
+    assert.equal(state.cleanupCalls, 1);
+    const deletesAfterFirst = storageDeleteUrls(calls).length;
+    assert.equal(deletesAfterFirst, 2);
+
+    const retry = await handler(adminEvent('/api/admin/media/purge', 'POST', TOKEN, body));
+    assert.equal(retry.statusCode, 200);
+    const retryBody = JSON.parse(retry.body);
+    assert.equal(retryBody.asset.status, 'purged');
+    assert.equal(retryBody.idempotent, true);
+    assert.equal(state.cleanupCalls, 1);
+    assert.equal(storageDeleteUrls(calls).length, deletesAfterFirst);
+  } finally {
+    restore();
+  }
+});
+
+test('media purge reports no success until every storage target is confirmed', async () => {
+  configure();
+  const operationId = '88888888-8888-4888-8888-88888888888c';
+  const assetId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaae';
+  const privatePath = `media/${assetId}`;
+  const trashPath = `trash/${assetId}/${'b'.repeat(64)}`;
+  const publicPath = `published/${assetId}/${'d'.repeat(64)}`;
+  let cleanupRequest = null;
+  const calls = installFetch([
+    ...adminRoutes({
+      mediaPurgeBegin: reply({
+        state: 'purging', operation_id: operationId, asset_id: assetId,
+        logical_path: privatePath, original_name: 'x.png',
+        private_object_path: privatePath, trash_object_path: trashPath, public_object_path: publicPath,
+        private_cleanup_state: 'pending', trash_cleanup_state: 'pending', public_cleanup_state: 'pending',
+      }),
+      mediaPurgeCleanup: (_url, init) => {
+        cleanupRequest = JSON.parse(init.body);
+        return reply({
+          state: 'purging', asset_id: assetId, logical_path: privatePath,
+          private_cleanup_state: 'done', trash_cleanup_state: 'done', public_cleanup_state: 'pending',
+          operation_id: operationId, idempotent: false,
+        });
+      },
+    }),
+    { match: `/storage/v1/object/ccafe-media/${privatePath}`, reply: reply({}) },
+    { match: `/storage/v1/object/ccafe-trash/${trashPath}`, reply: reply({}) },
+    { match: `/storage/v1/object/ccafe-public/${publicPath}`, reply: reply({ error: 'storage_failure' }, 500) },
+  ]);
+  try {
+    const result = await handler(adminEvent('/api/admin/media/purge', 'POST', TOKEN, {
+      asset_id: assetId, operation_id: operationId, confirmation: 'حذف الصورة نهائيًا',
+    }));
+    assert.equal(result.statusCode, 502);
+    const body = JSON.parse(result.body);
+    assert.equal(body.error, 'cleanup_pending');
+    assert.equal(body.asset.private_cleanup_state, 'done');
+    assert.equal(body.asset.trash_cleanup_state, 'done');
+    assert.equal(body.asset.public_cleanup_state, 'pending');
+    assert.equal(cleanupRequest.p_private_done, true);
+    assert.equal(cleanupRequest.p_trash_done, true);
+    assert.equal(cleanupRequest.p_public_done, false);
+    assert.deepEqual(storageDeleteUrls(calls), [
+      `https://example.supabase.co/storage/v1/object/ccafe-media/${privatePath}`,
+      `https://example.supabase.co/storage/v1/object/ccafe-trash/${trashPath}`,
+      `https://example.supabase.co/storage/v1/object/ccafe-public/${publicPath}`,
+    ]);
+  } finally {
+    restore();
+  }
+});
+
+test('media purge refuses out-of-scope storage paths without deleting anything', async () => {
+  configure();
+  const operationId = '88888888-8888-4888-8888-88888888888d';
+  const assetId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaf';
+  const otherId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaag';
+  const calls = installFetch([
+    ...adminRoutes({
+      mediaPurgeBegin: reply({
+        state: 'purging', operation_id: operationId, asset_id: assetId,
+        logical_path: `media/${assetId}`, original_name: 'x.png',
+        private_object_path: `media/${otherId}`,
+        trash_object_path: `trash/${otherId}/${'b'.repeat(64)}`,
+        public_object_path: `published/${otherId}/${'d'.repeat(64)}`,
+        private_cleanup_state: 'pending', trash_cleanup_state: 'pending', public_cleanup_state: 'pending',
+      }),
+    }),
+  ]);
+  try {
+    const result = await handler(adminEvent('/api/admin/media/purge', 'POST', TOKEN, {
+      asset_id: assetId, operation_id: operationId, confirmation: 'حذف الصورة نهائيًا',
+    }));
+    assert.equal(result.statusCode, 502);
+    assert.equal(JSON.parse(result.body).error, 'upstream_unavailable');
+    assert.deepEqual(storageDeleteUrls(calls), []);
   } finally {
     restore();
   }

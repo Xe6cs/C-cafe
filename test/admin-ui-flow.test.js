@@ -322,11 +322,17 @@ function createSiteServer(initial) {
   }
 
   return {
+    historyEntries: [],
+    trashItems: [],
+    historyDeleteHandler: null,
+    mediaPurgeHandler: null,
     defaultPost,
     commit,
     snapshot() { return clone(status); },
     setGetHandler(handler) { getHandler = handler; },
     setPostHandler(handler) { postHandler = handler; },
+    setHistoryDeleteHandler(handler) { this.historyDeleteHandler = handler; },
+    setMediaPurgeHandler(handler) { this.mediaPurgeHandler = handler; },
     get() { return getHandler(); },
     post(request) { return postHandler(request); },
     operationIds() { return [...operations.keys()]; },
@@ -392,7 +398,7 @@ function createHarness(server) {
     },
     location: { hash: (server && server.hash) || '#site-status' },
     history: { replaceState() {} },
-    CcafeEditor: { renderContent() {}, renderSections() {} },
+    CcafeEditor: { renderContent() {}, renderSections() {}, MEDIA_RE: /^media\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/ },
     addEventListener() {},
     setTimeout: () => 0,
     clearTimeout() {},
@@ -411,13 +417,30 @@ function createHarness(server) {
     if (path === `${api}/bootstrap`) return jsonResponse(bootstrap(historyEntries));
     if (path === `${api}/history`) return jsonResponse({ entries: clone(historyEntries) });
     if (path === `${api}/history/clear`) return historyClearHandler({ body, path, method });
+    if (path === `${api}/media/trash`) return jsonResponse({ items: clone(server.trashItems || []) });
+    if (path === `${api}/history/delete`) {
+      if (server.historyDeleteHandler) return server.historyDeleteHandler({ body, path, method });
+      const id = body && body.history_id;
+      const idx = historyEntries.findIndex((e) => Number(e.id) === Number(id));
+      if (idx < 0) return jsonResponse({ error: 'not_found' }, 404);
+      const [removed] = historyEntries.splice(idx, 1);
+      return jsonResponse({ operation_id: body.operation_id, history_id: removed.id, version: removed.version, deleted: true, was_current_published_version: false, deleted_at: ISO });
+    }
+    if (path === `${api}/media/purge`) {
+      if (server.mediaPurgeHandler) return server.mediaPurgeHandler({ body, path, method });
+      const id = body && body.asset_id;
+      const idx = (server.trashItems || []).findIndex((e) => e.asset_id === id);
+      if (idx >= 0) server.trashItems.splice(idx, 1);
+      return jsonResponse({ asset: { id, logical_path: `media/${id}`, status: 'purged', private_cleanup_state: 'done', trash_cleanup_state: 'done', public_cleanup_state: 'none' }, idempotent: false });
+    }
+    if (path === `${api}/media/delete`) return jsonResponse({ state: 'trashed', asset_id: body.asset_id, logical_path: `media/${body.asset_id}`, idempotent: false });
     if (path === `${api}/media`) {
       return jsonResponse({
         assets: [],
         originals: [],
         urls: {},
         limits: {},
-        media_enabled: false,
+        media_enabled: true,
       });
     }
     if (path === `${api}/site-status`) {
@@ -467,7 +490,7 @@ function createHarness(server) {
     byId,
     requests,
     view,
-    text() { return view.textContent; },
+    text() { return view.textContent + ' ' + (byId['toasts'] ? byId['toasts'].textContent : ''); },
     stateLabel() {
       const row = view.querySelectorAll('.site-state-row')[0];
       if (!row) return '';
@@ -507,6 +530,68 @@ async function flush(times = 20) {
 
 function dialogButton(dialog, label) {
   return dialog.querySelectorAll('button').find((node) => node.textContent.includes(label)) || null;
+}
+
+function trashPurgeButton(harness) {
+  for (const card of harness.view.querySelectorAll('.media-card-trash')) {
+    const button = card.querySelectorAll('button')
+      .find((node) => /حذف نهائي|الحذف النهائي/.test(node.textContent));
+    if (button) return button;
+  }
+  return null;
+}
+
+function pendingPurgeButton(harness) {
+  const section = harness.view.querySelectorAll('.media-purge-pending')[0];
+  if (!section) return null;
+  return section.querySelectorAll('button')
+    .find((node) => node.textContent.includes('الحذف النهائي')) || null;
+}
+
+async function openTrash(harness) {
+  if (!trashPurgeButton(harness)) {
+    const trashTab = Array.from(harness.view.querySelectorAll('button, a'))
+      .find((node) => node.textContent.includes('المهملات'));
+    if (trashTab) { trashTab.click(); await flush(); }
+  }
+  const refresh = harness.view.querySelectorAll('button')
+    .find((node) => node.textContent.includes('تحديث المكتبة'));
+  if (refresh) {
+    refresh.click();
+    await flush(); await flush(); await flush();
+  }
+  return trashPurgeButton(harness);
+}
+
+function trashItem(overrides = {}) {
+  return {
+    asset_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    logical_path: 'media/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    original_name: 'x.png',
+    mime: 'image/png',
+    bytes: 10,
+    width: 1,
+    height: 1,
+    state: 'trashed',
+    deleted_at: ISO,
+    cleanup_state: 'done',
+    public_cleanup_state: 'none',
+    ...overrides,
+  };
+}
+
+function purgeSuccess(id) {
+  return {
+    asset: {
+      id,
+      logical_path: `media/${id}`,
+      status: 'purged',
+      private_cleanup_state: 'done',
+      trash_cleanup_state: 'done',
+      public_cleanup_state: 'none',
+    },
+    idempotent: false,
+  };
 }
 
 async function login(harness) {
@@ -959,4 +1044,279 @@ test('history clear dialog cannot open twice while confirming', async () => {
   harness.button('حذف سجل التعديلات نهائيًا').click();
   await flush();
   assert.equal(harness.dialogs().length, 1);
+});
+
+test('single history row delete requires confirmation, targets only selected row, and reuses operation id after lost response', async () => {
+  const server = createSiteServer(runningStatus());
+  server.hash = '#history';
+  server.historyEntries = sampleHistory();
+  const harness = createHarness(server);
+  await login(harness);
+
+  const delBtns = () => Array.from(harness.view.querySelectorAll('button')).filter((b) => b.textContent.includes('حذف نهائي') && b.textContent.includes('#260'));
+  assert.equal(delBtns().length, 1);
+  delBtns()[0].click();
+  await flush();
+  let dialog = harness.dialogs()[0];
+  assert.ok(dialog);
+  assert.match(dialog.textContent, /#260/);
+  let confirm = dialogButton(dialog, 'حذف هذه النسخة نهائيًا');
+  assert.equal(confirm.disabled, true);
+  dialog.querySelector('input').value = 'خطأ';
+  dialog.querySelector('input').dispatch('input');
+  confirm.click();
+  await flush();
+  assert.equal(harness.posts(api + '/history/delete').length, 0);
+
+  dialogButton(dialog, 'إلغاء').click();
+  await flush();
+  delBtns()[0].click();
+  await flush();
+  dialog = harness.dialogs()[0];
+  dialog.querySelector('input').value = 'حذف هذه النسخة نهائيًا';
+  dialog.querySelector('input').dispatch('input');
+  confirm = dialogButton(dialog, 'حذف هذه النسخة نهائيًا');
+
+  let lost = false;
+  let opId = null;
+  server.setHistoryDeleteHandler(async (request) => {
+    if (!lost) {
+      lost = true;
+      opId = request.body.operation_id;
+      server.historyEntries = server.historyEntries.filter((e) => e.id !== request.body.history_id);
+      harness.setHistoryEntries(server.historyEntries);
+      return Promise.reject(networkError('lost'));
+    }
+    return jsonResponse({ operation_id: request.body.operation_id, history_id: request.body.history_id, version: 260, deleted: true, was_current_published_version: false, deleted_at: ISO });
+  });
+
+  confirm.click();
+  await flush();
+  const posts = harness.posts(api + '/history/delete');
+  assert.equal(posts.length >= 1, true);
+  assert.equal(posts[0].body.history_id, 3);
+  assert.equal(posts[0].body.operation_id, opId);
+  const retryBtns = Array.from(harness.view.querySelectorAll('button')).filter((b)=>b.textContent.includes('إعادة المحاولة'));
+  if (retryBtns.length) { retryBtns[0].click(); await flush(); }
+  const posts2 = harness.posts(api + '/history/delete');
+  assert.ok(posts2.some((p)=>p.body.operation_id === opId && p.body.history_id === 3));
+  assert.ok(server.historyEntries.every((e)=>e.id !== 3));
+  assert.ok(server.historyEntries.some((e)=>e.id === 2));
+});
+
+test('history delete preserves unsaved editor edits and reports refresh failure separately', async () => {
+  const server = createSiteServer(runningStatus());
+  server.hash = '#history';
+  server.historyEntries = sampleHistory();
+  const harness = createHarness(server);
+  await login(harness);
+  harness.window.__TEST_STATE__.content = { note: 'unsaved' };
+  harness.window.__TEST_STATE__.saveState = 'dirty';
+  const before = JSON.stringify(harness.window.__TEST_STATE__.content);
+
+  server.setHistoryDeleteHandler(async (request) => {
+    server.historyEntries = server.historyEntries.filter((e)=>e.id !== request.body.history_id);
+    return jsonResponse({ operation_id: request.body.operation_id, history_id: request.body.history_id, version: 260, deleted: true, was_current_published_version: false, deleted_at: ISO });
+  });
+  harness.setFetchOverride(async (path, init, base) => {
+    if (path === api + '/history') return Promise.reject(networkError('refresh-failed'));
+    return base(path, init);
+  });
+
+  const btn = Array.from(harness.view.querySelectorAll('button')).find((b)=>b.textContent.includes('حذف نهائي') && b.textContent.includes('#260'));
+  btn.click(); await flush();
+  const dialog = harness.dialogs()[0];
+  dialog.querySelector('input').value = 'حذف هذه النسخة نهائيًا';
+  dialog.querySelector('input').dispatch('input');
+  dialogButton(dialog, 'حذف هذه النسخة نهائيًا').click();
+  await flush();
+
+  assert.equal(JSON.stringify(harness.window.__TEST_STATE__.content), before);
+  const txt=harness.text(); assert.ok(txt.includes('\u062d\u0630\u0641') || txt.includes('\u062a\u062d\u062f\u064a\u062b') || txt.includes('\u0641\u0634\u0644'), 'TXT:'+txt.slice(-300));
+});
+
+test('permanent purge validates asset.id/status, requires confirmation, and shows success without a failure message', async () => {
+  const server = createSiteServer(runningStatus());
+  server.hash = '#media';
+  server.trashItems = [trashItem()];
+  const harness = createHarness(server);
+  await login(harness);
+  harness.window.__TEST_STATE__.content = { note: 'unsaved-purge' };
+
+  const first = await openTrash(harness);
+  assert.ok(first, 'permanent delete must be available in trash');
+  first.click(); first.click();
+  await flush();
+  assert.equal(harness.dialogs().length, 1, 'duplicate clicks must not open two dialogs');
+  const dialog = harness.dialogs()[0];
+  const confirm = dialogButton(dialog, 'حذف الصورة نهائيًا');
+  assert.equal(confirm.disabled, true, 'confirmation must be typed first');
+
+  dialogButton(dialog, 'إلغاء').click();
+  await flush();
+  assert.equal(harness.dialogs().length, 0);
+  assert.equal(harness.posts(`${api}/media/purge`).length, 0, 'cancel must not send a request');
+
+  const second = await openTrash(harness);
+  assert.ok(second);
+  second.click();
+  await flush();
+  const confirmAgain = dialogButton(harness.dialogs()[0], 'حذف الصورة نهائيًا');
+  const input = harness.dialogs()[0].querySelector('input');
+  input.value = 'حذف الصورة نهائيًا';
+  input.dispatch('input');
+  assert.equal(confirmAgain.disabled, false);
+
+  server.setMediaPurgeHandler(async (request) => jsonResponse(purgeSuccess(request.body.asset_id)));
+  confirmAgain.click();
+  await flush(); await flush();
+
+  const posts = harness.posts(`${api}/media/purge`);
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].body.asset_id, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+  assert.match(harness.text(), /تم الحذف النهائي للصورة/);
+  assert.doesNotMatch(harness.text(), /تعذّر|فشل|لم يُعلن نجاح/);
+  assert.equal(harness.window.__TEST_STATE__.media.purgePending, null);
+  assert.deepEqual(harness.window.__TEST_STATE__.content, { note: 'unsaved-purge' });
+});
+
+test('lost purge response keeps a mandatory pending retry with the same operation id even when the trash row disappears', async () => {
+  const server = createSiteServer(runningStatus());
+  server.hash = '#media';
+  server.trashItems = [trashItem()];
+  const harness = createHarness(server);
+  await login(harness);
+  const button = await openTrash(harness);
+  assert.ok(button);
+  button.click();
+  await flush();
+  const dialog = harness.dialogs()[0];
+  const input = dialog.querySelector('input');
+  input.value = 'حذف الصورة نهائيًا';
+  input.dispatch('input');
+
+  let calls = 0;
+  let firstOperationId = null;
+  server.setMediaPurgeHandler(async (request) => {
+    calls += 1;
+    if (calls === 1) {
+      firstOperationId = request.body.operation_id;
+      server.trashItems = [];
+      return Promise.reject(networkError('lost-response'));
+    }
+    return jsonResponse(purgeSuccess(request.body.asset_id));
+  });
+
+  dialogButton(dialog, 'حذف الصورة نهائيًا').click();
+  await flush(); await flush();
+
+  const firstPosts = harness.posts(`${api}/media/purge`);
+  assert.equal(firstPosts.length, 1);
+  assert.equal(firstPosts[0].body.operation_id, firstOperationId);
+  assert.equal(trashPurgeButton(harness), null, 'the trash row is gone');
+  const retry = pendingPurgeButton(harness);
+  assert.ok(retry, 'a pending verification/retry action must remain outside the trash row');
+
+  retry.click();
+  await flush(); await flush();
+
+  const posts = harness.posts(`${api}/media/purge`);
+  assert.equal(posts.length, 2, 'two real purge requests must be sent');
+  assert.equal(posts[1].body.operation_id, firstOperationId, 'retry must reuse the same operation id');
+  assert.match(harness.text(), /تم الحذف النهائي للصورة/);
+  assert.equal(harness.window.__TEST_STATE__.media.purgePending, null);
+});
+
+test('purging trash item from a new session resumes with the server operation id without a new confirmation', async () => {
+  const operationId = '99999999-9999-4999-8999-999999999999';
+  const server = createSiteServer(runningStatus());
+  server.hash = '#media';
+  server.trashItems = [trashItem({
+    asset_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+    logical_path: 'media/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+    state: 'purging',
+    purge_operation_id: operationId,
+  })];
+  const harness = createHarness(server);
+  await login(harness);
+  const button = await openTrash(harness);
+  assert.ok(button);
+  assert.match(button.textContent, /استكمال الحذف النهائي/);
+
+  let sentOperationId = null;
+  server.setMediaPurgeHandler(async (request) => {
+    sentOperationId = request.body.operation_id;
+    return jsonResponse(purgeSuccess(request.body.asset_id));
+  });
+
+  button.click();
+  await flush(); await flush();
+
+  assert.equal(harness.dialogs().length, 0, 'resume must not create a new confirmation dialog');
+  const posts = harness.posts(`${api}/media/purge`);
+  assert.equal(posts.length, 1);
+  assert.equal(sentOperationId, operationId);
+  assert.equal(posts[0].body.operation_id, operationId);
+  assert.match(harness.text(), /تم الحذف النهائي للصورة/);
+});
+
+test('purge handles cleanup_pending and media_in_use from real apiSend error payloads', async () => {
+  const cleanupServer = createSiteServer(runningStatus());
+  cleanupServer.hash = '#media';
+  cleanupServer.trashItems = [trashItem()];
+  const cleanupHarness = createHarness(cleanupServer);
+  await login(cleanupHarness);
+  const cleanupButton = await openTrash(cleanupHarness);
+  assert.ok(cleanupButton);
+  cleanupButton.click();
+  await flush();
+  const cleanupDialog = cleanupHarness.dialogs()[0];
+  const cleanupInput = cleanupDialog.querySelector('input');
+  cleanupInput.value = 'حذف الصورة نهائيًا';
+  cleanupInput.dispatch('input');
+  cleanupServer.setMediaPurgeHandler(async (request) => jsonResponse({
+    error: 'cleanup_pending',
+    asset: {
+      id: request.body.asset_id,
+      logical_path: `media/${request.body.asset_id}`,
+      status: 'purging',
+      private_cleanup_state: 'done',
+      trash_cleanup_state: 'pending',
+      public_cleanup_state: 'none',
+    },
+  }, 502));
+  dialogButton(cleanupDialog, 'حذف الصورة نهائيًا').click();
+  await flush(); await flush();
+  assert.equal(cleanupHarness.posts(`${api}/media/purge`).length, 1);
+  assert.match(cleanupHarness.text(), /تنظيف بعض ملفات Storage|لم يُعلن نجاح/);
+  assert.doesNotMatch(cleanupHarness.text(), /تم الحذف النهائي للصورة/);
+  assert.ok(pendingPurgeButton(cleanupHarness), 'cleanup_pending must expose an explicit completion action');
+
+  const blockedServer = createSiteServer(runningStatus());
+  blockedServer.hash = '#media';
+  blockedServer.trashItems = [trashItem()];
+  const blockedHarness = createHarness(blockedServer);
+  await login(blockedHarness);
+  const blockedButton = await openTrash(blockedHarness);
+  assert.ok(blockedButton);
+  blockedButton.click();
+  await flush();
+  const blockedDialog = blockedHarness.dialogs()[0];
+  const blockedInput = blockedDialog.querySelector('input');
+  blockedInput.value = 'حذف الصورة نهائيًا';
+  blockedInput.dispatch('input');
+  blockedServer.setMediaPurgeHandler(async (request) => jsonResponse({
+    error: 'media_in_use',
+    reasons: ['published', 'history'],
+    references: { published: true, draft: false, history_count: 2 },
+    asset_id: request.body.asset_id,
+  }, 409));
+  dialogButton(blockedDialog, 'حذف الصورة نهائيًا').click();
+  await flush(); await flush();
+  assert.equal(blockedHarness.posts(`${api}/media/purge`).length, 1);
+  assert.match(blockedHarness.text(), /المنشور الحالي/);
+  assert.match(blockedHarness.text(), /سجل النسخ/);
+  assert.match(blockedHarness.text(), /\(2\)/);
+  assert.doesNotMatch(blockedHarness.text(), /تم الحذف النهائي للصورة/);
+  assert.equal(pendingPurgeButton(blockedHarness), null, 'blocked purge must not leave a resume action');
 });

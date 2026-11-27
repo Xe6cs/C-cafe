@@ -143,3 +143,7 @@ table.recent { margin-block-start: 0; }
   .readonly-actions .btn { width: 100%; }
   .recent td.note-cell { max-width: none; }
 }
+
+.btn-danger-ghost{color:#b42318;border:1px solid rgba(180,35,24,.25);background:transparent}
+.btn-danger-ghost:hover:not(:disabled){background:rgba(180,35,24,.08)}
+.btn-danger-ghost:disabled{opacity:.55;cursor:not-allowed}

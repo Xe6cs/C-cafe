@@ -34,6 +34,7 @@ const MIGRATIONS = [
   'supabase/migrations/20261111090000_media_public_assets.sql',
   'supabase/migrations/20261112090000_media_trash.sql',
   'supabase/migrations/20261113090000_media_public_ready_delete.sql',
+  'supabase/migrations/20261128120000_media_permanent_delete_and_history_row_delete.sql',
 ];
 
 const ADMIN_ID = '11111111-1111-1111-1111-111111111111';
@@ -127,6 +128,13 @@ const RESTORE_BEGIN_SQL =
   'select public.admin_media_restore_begin($1::uuid, $2::text, $3::uuid) as result';
 const RESTORE_FINISH_SQL =
   'select public.admin_media_restore_finish($1::uuid, $2::text, $3::uuid) as result';
+const PURGE_BEGIN_SQL =
+  'select public.admin_media_purge_begin($1::uuid, $2::text, $3::uuid, $4::text) as result';
+const PREPARE_PUBLIC_SQL =
+  'select public.admin_media_prepare_public($1::uuid, $2::text) as result';
+const CONFIRM_PUBLIC_SQL =
+  'select public.admin_media_confirm_public($1::uuid, $2::text, $3::text) as result';
+const PURGE_CONFIRMATION = 'حذف الصورة نهائيًا';
 
 function contentWith(label) {
   const copy = structuredClone(defaultContent);
@@ -357,6 +365,25 @@ if (unavailable) {
       [approved.id, FINALIZE_TOKEN, operationId, true, null, null, null],
     );
     return { approved, begun, finished, operationId };
+  }
+
+  async function createTrashedReadyPublicAsset(ctx, session) {
+    const ready = await createReadyPublicAsset(ctx, session);
+    const operationId = randomUUID();
+    const begun = await call(session, DELETE_BEGIN_SQL, [ready.approved.id, FINALIZE_TOKEN, operationId]);
+    await ctx.db.query(
+      "insert into storage.objects (bucket_id, name) values ('ccafe-trash', $1)",
+      [begun.object_path],
+    );
+    const finished = await call(session, DELETE_FINISH_SQL, [
+      ready.approved.id,
+      FINALIZE_TOKEN,
+      operationId,
+      ready.approved.sha256,
+    ]);
+    assert.equal(finished.state, 'trashed');
+    assert.equal(finished.public_cleanup_state, 'pending');
+    return { ...ready, begun, finished, operationId };
   }
 
   async function pid(client) {
@@ -606,5 +633,176 @@ if (unavailable) {
     );
     assert.equal(cleanup.cleanup_state, 'done');
     assert.equal(cleanup.public_cleanup_state, 'done');
+  });
+
+  test('الحذف النهائي مقابل حفظ مسودة: القفل يمنع المرجع canonical والخام ورابط النشر', async (t) => {
+    const ctx = await createTestDb(t);
+    const setup = await ctx.session();
+    const purging = await ctx.session();
+    const saving = await ctx.session();
+    const trashed = await createTrashedAsset(ctx, setup);
+    const asset = trashed.approved;
+    const site = (await ctx.db.query('select version from public.site_content where id = 1')).rows[0];
+    const draftBefore = (await ctx.db.query('select revision_id from public.draft where id = 1')).rows[0] || null;
+
+    await purging.query('begin');
+    const begun = await call(purging, PURGE_BEGIN_SQL, [asset.id, FINALIZE_TOKEN, randomUUID(), PURGE_CONFIRMATION]);
+    assert.equal(begun.state, 'purging');
+    await waitForAdvisoryLock(ctx.db, await pid(purging));
+
+    await saving.query('begin');
+    const savingPid = await pid(saving);
+    const savePromise = call(saving, SAVE_SQL, [
+      site.version,
+      draftBefore ? draftBefore.revision_id : null,
+      JSON.stringify(contentWithMedia('purge-save-race', asset.logical_path)),
+    ]);
+    await waitForBlocked(ctx.db, savingPid, await pid(purging));
+
+    await purging.query('commit');
+    await expectReject(savePromise, /permanently deleted/, 'draft save after purge begins');
+    await saving.query('rollback');
+
+    const draftAfter = (await ctx.db.query('select revision_id from public.draft where id = 1')).rows[0] || null;
+    assert.equal(draftAfter && draftAfter.revision_id, draftBefore && draftBefore.revision_id,
+      'no draft may be written with a reference to an asset being purged');
+
+    // The purge row remains in the purging state through Storage cleanup, so
+    // later writers must also reject bare ids and public links, not just paths.
+    const variants = [
+      ['bare asset id', asset.id],
+      ['public link', `https://example.supabase.co/storage/v1/object/public/ccafe-public/published/${asset.id}/${asset.sha256}`],
+    ];
+    for (const [label, ref] of variants) {
+      await expectReject(
+        call(saving, SAVE_SQL, [
+          site.version,
+          draftAfter ? draftAfter.revision_id : null,
+          JSON.stringify(contentWithMedia(`purge-${label}`, ref)),
+        ]),
+        /permanently deleted/,
+        `draft save with ${label}`,
+      );
+    }
+  });
+
+  test('الحذف النهائي مقابل نشر: أي مرجع للصورة أثناء التنظيف يُرفض', async (t) => {
+    const ctx = await createTestDb(t);
+    const setup = await ctx.session();
+    const purging = await ctx.session();
+    const publishing = await ctx.session();
+    const trashed = await createTrashedAsset(ctx, setup);
+    const asset = trashed.approved;
+    const site = (await ctx.db.query('select version from public.site_content where id = 1')).rows[0];
+
+    await purging.query('begin');
+    await call(purging, PURGE_BEGIN_SQL, [asset.id, FINALIZE_TOKEN, randomUUID(), PURGE_CONFIRMATION]);
+    await waitForAdvisoryLock(ctx.db, await pid(purging));
+
+    await publishing.query('begin');
+    const publishingPid = await pid(publishing);
+    const publishPromise = call(publishing, PUBLISH_SQL, [
+      site.version,
+      null,
+      JSON.stringify(contentWithMedia('purge-publish-race', asset.logical_path)),
+      'purge publish race',
+      randomUUID(),
+    ]);
+    await waitForBlocked(ctx.db, publishingPid, await pid(purging));
+
+    await purging.query('commit');
+    await expectReject(publishPromise, /permanently deleted/, 'publish after purge begins');
+    await publishing.query('rollback');
+
+    assert.equal((await ctx.db.query('select version from public.site_content where id = 1')).rows[0].version, site.version);
+
+    const variants = [asset.id, `https://example.supabase.co/storage/v1/object/public/ccafe-public/published/${asset.id}/${asset.sha256}`];
+    for (const ref of variants) {
+      await expectReject(
+        call(publishing, PUBLISH_SQL, [
+          site.version,
+          null,
+          JSON.stringify(contentWithMedia('purge-publish-id', ref)),
+          'purge publish id',
+          randomUUID(),
+        ]),
+        /permanently deleted/,
+        `publish with ${ref}`,
+      );
+    }
+  });
+
+  test('الحذف النهائي مقابل استعادة الصورة: الاستعادة لا تبدأ أثناء التنظيف', async (t) => {
+    const ctx = await createTestDb(t);
+    const setup = await ctx.session();
+    const purging = await ctx.session();
+    const restoring = await ctx.session();
+    const trashed = await createTrashedAsset(ctx, setup);
+    const asset = trashed.approved;
+
+    await purging.query('begin');
+    await call(purging, PURGE_BEGIN_SQL, [asset.id, FINALIZE_TOKEN, randomUUID(), PURGE_CONFIRMATION]);
+    await waitForAdvisoryLock(ctx.db, await pid(purging));
+
+    await restoring.query('begin');
+    const restoringPid = await pid(restoring);
+    const restorePromise = call(restoring, RESTORE_BEGIN_SQL, [asset.id, FINALIZE_TOKEN, randomUUID()]);
+    await waitForBlocked(ctx.db, restoringPid, await pid(purging));
+
+    await purging.query('commit');
+    await expectReject(restorePromise, /permanently deleted/, 'media restore during purge');
+    await restoring.query('rollback');
+
+    const row = (await ctx.db.query('select status from public.media_assets where id = $1', [asset.id])).rows[0];
+    assert.equal(row.status, 'purging', 'a blocked restore must not change the purging asset');
+  });
+
+  test('الحذف النهائي مقابل تجهيز وتأكيد نسخة عامة: لا تُنشأ نسخة جديدة', async (t) => {
+    const ctx = await createTestDb(t);
+    const setup = await ctx.session();
+    const purging = await ctx.session();
+    const preparing = await ctx.session();
+    const confirming = await ctx.session();
+    const trashed = await createTrashedReadyPublicAsset(ctx, setup);
+    const asset = trashed.approved;
+
+    await purging.query('begin');
+    const purgingPid = await pid(purging);
+    const begun = await call(purging, PURGE_BEGIN_SQL, [asset.id, FINALIZE_TOKEN, randomUUID(), PURGE_CONFIRMATION]);
+    assert.equal(begun.public_cleanup_state, 'pending');
+    await waitForAdvisoryLock(ctx.db, purgingPid);
+
+    await preparing.query('begin');
+    const preparingPid = await pid(preparing);
+    const preparePromise = call(preparing, PREPARE_PUBLIC_SQL, [asset.id, FINALIZE_TOKEN]);
+    await waitForBlocked(ctx.db, preparingPid, purgingPid);
+
+    await confirming.query('begin');
+    const confirmingPid = await pid(confirming);
+    let confirmSettled = false;
+    const confirmPromise = call(confirming, CONFIRM_PUBLIC_SQL, [asset.id, FINALIZE_TOKEN, asset.sha256])
+      .then((value) => { confirmSettled = true; return value; })
+      .catch((error) => { confirmSettled = true; throw error; });
+    // A second row-lock waiter can be queued behind the first one, so accept
+    // either blocker, or a prompt rejection from the RPC itself.
+    await waitFor(async () => {
+      const row = await ctx.db.query('select pg_blocking_pids($1) as blockers', [confirmingPid]);
+      return confirmSettled
+        || row.rows[0].blockers.includes(purgingPid)
+        || row.rows[0].blockers.includes(preparingPid);
+    }, `pid ${confirmingPid} blocked or settled during purge`);
+
+    await purging.query('commit');
+    await expectReject(preparePromise, /not approved|permanently deleted/, 'public prepare during purge');
+    await expectReject(confirmPromise, /not approved|permanently deleted/, 'public confirm during purge');
+    await preparing.query('rollback');
+    await confirming.query('rollback');
+
+    const publicRow = (await ctx.db.query(
+      'select state, object_path from public.media_public_assets where asset_id = $1',
+      [asset.id],
+    )).rows[0];
+    assert.equal(publicRow.state, 'failed', 'a purging asset must never regain a ready public copy');
+    assert.equal(publicRow.object_path, trashed.prepared.object_path);
   });
 }

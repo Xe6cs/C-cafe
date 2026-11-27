@@ -34,11 +34,19 @@ const root = path.resolve(here, '..', '..');
 const MIGRATIONS = [
   'supabase/migrations/20261106120000_content_core.sql',
   'supabase/migrations/20261106121000_content_api.sql',
+  'supabase/migrations/20261108020000_conflict_sqlstate.sql',
+  'supabase/migrations/20261109090000_media_library.sql',
+  'supabase/migrations/20261110090000_media_finalize_claim.sql',
+  'supabase/migrations/20261111090000_media_public_assets.sql',
+  'supabase/migrations/20261112090000_media_trash.sql',
+  'supabase/migrations/20261113090000_media_public_ready_delete.sql',
+  'supabase/migrations/20261113100000_media_public_admin_read.sql',
   'supabase/migrations/20261114090000_analytics.sql',
   'supabase/migrations/20261115090000_analytics_digest_guard.sql',
   'supabase/migrations/20261116090000_analytics_day_cap.sql',
   'supabase/migrations/20261126120000_site_status.sql',
   'supabase/migrations/20261127120000_content_history_clear.sql',
+  'supabase/migrations/20261128120000_media_permanent_delete_and_history_row_delete.sql',
 ];
 
 const ADMIN_ID = '11111111-1111-1111-1111-111111111111';
@@ -84,6 +92,30 @@ const BOOTSTRAP_SQL = `
   insert into auth.users (id, email) values
     ('${ADMIN_ID}', 'admin@local.test'),
     ('${USER_ID}', 'user@local.test');
+
+  create schema storage;
+  create table storage.buckets (
+    id text primary key,
+    name text not null,
+    public boolean not null default false,
+    file_size_limit bigint,
+    allowed_mime_types text[]
+  );
+  create table storage.objects (
+    id uuid primary key default gen_random_uuid(),
+    bucket_id text not null references storage.buckets (id),
+    name text not null,
+    owner uuid,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    last_accessed_at timestamptz,
+    metadata jsonb,
+    unique (bucket_id, name)
+  );
+  alter table storage.objects enable row level security;
+  grant usage on schema storage to anon, authenticated;
+  grant select, insert, update, delete on storage.objects to authenticated;
+  grant select on storage.buckets to anon, authenticated;
 `;
 
 const SAVE_SQL = 'select public.admin_save_draft($1::bigint, $2::uuid, $3::jsonb) as result';
@@ -94,6 +126,8 @@ const RESTORE_SQL =
   'select public.admin_restore($1::bigint, $2::bigint, $3::text, $4::uuid) as result';
 const CLEAR_HISTORY_SQL =
   'select public.admin_clear_content_history($1::uuid, $2::text) as result';
+const DELETE_HISTORY_SQL =
+  'select public.admin_delete_content_history_entry($1::bigint, $2::uuid, $3::text) as result';
 const BEGIN_CHECK_SQL = 'select public.admin_begin_public_check($1::bigint) as result';
 const FINISH_CHECK_SQL =
   'select public.admin_finish_public_check($1::bigint, $2::text, $3::bigint, $4::text) as result';
@@ -509,7 +543,7 @@ if (unavailable) {
       [contentWithout('menu'), /missing a required top-level key/, 'missing key'],
       [(() => { const c = structuredClone(defaultContent); c.rogue = {}; return c; })(), /unknown top-level key/, 'unknown key'],
       [(() => { const c = structuredClone(defaultContent); c.header.nav[0].href = 'javascript:alert(1)'; return c; })(), /unsafe link/, 'unsafe href'],
-      [(() => { const c = structuredClone(defaultContent); c.brand.logo = '../secret.png'; return c; })(), /image paths must stay under assets/, 'bad image path'],
+      [(() => { const c = structuredClone(defaultContent); c.brand.logo = '../secret.png'; return c; })(), /image paths must reference an approved media asset|image paths must stay under assets/, 'bad image path'],
       [(() => { const c = structuredClone(defaultContent); c.hero.big = 'x'.repeat(4001); return c; })(), /content string is too long/, 'long string'],
       [(() => { const c = structuredClone(defaultContent); c.layout.order = ['moods', 'moods', 'offer', 'menu', 'visit']; return c; })(), /duplicate section/, 'duplicate section'],
       [(() => { const c = structuredClone(defaultContent); c.settings.tracking = 'yes'; return c; })(), /settings.tracking must be boolean/, 'bad toggle'],
@@ -1163,6 +1197,88 @@ if (unavailable) {
 
       assert.equal(await count(ctx.db, 'content_history'), 0);
       assert.equal((await state(ctx.db)).version, 2);
+    } finally {
+      await a.end();
+      await b.end();
+    }
+  });
+
+  test('حذف سجل واحد مع استعادة متزامنة: السجل المحذوف لا يُستعاد والطلب القديم لا يمس غيره', async (t) => {
+    const ctx = await createTestDb(t);
+    const a = await session(ctx.name, 'authenticated', ADMIN_ID);
+    const b = await session(ctx.name, 'authenticated', ADMIN_ID);
+    const deleteOp = randomUUID();
+
+    try {
+      await call(a, PUBLISH_SQL, [1, null, JSON.stringify(contentWith('v2')), null, randomUUID()]);
+      const history = await historyRows(ctx.db);
+      const target = history.find((row) => row.version === 1);
+      const survivor = history.find((row) => row.version === 2);
+      assert.ok(target && survivor);
+
+      await a.query('begin');
+      const deleted = await call(a, DELETE_HISTORY_SQL, [target.id, deleteOp, 'حذف هذه النسخة نهائيًا']);
+      assert.equal(Number(deleted.history_id), Number(target.id));
+      await waitForAdvisoryLock(ctx.db, a.processID);
+
+      await b.query('begin');
+      const restorePromise = call(b, RESTORE_SQL, [target.id, 2, 'restore deleted row', randomUUID()]);
+      await waitForBlocked(ctx.db, b.processID, a.processID);
+
+      await a.query('commit');
+      await assert.rejects(restorePromise, /history version not found/);
+      await b.query('rollback');
+
+      const after = await historyRows(ctx.db);
+      assert.equal(after.length, 1, 'only the targeted history row may disappear');
+      assert.equal(Number(after[0].id), Number(survivor.id));
+      assert.equal((await state(ctx.db)).version, 2);
+
+      const replay = await call(a, DELETE_HISTORY_SQL, [target.id, deleteOp, 'حذف هذه النسخة نهائيًا']);
+      assert.deepEqual(replay, deleted, 'a replay must return the stored result');
+      assert.equal((await historyRows(ctx.db)).length, 1);
+
+      // Reusing the old operation id with a *different* row must never delete
+      // that other row, even after the original target is gone.
+      await assert.rejects(
+        call(a, DELETE_HISTORY_SQL, [survivor.id, deleteOp, 'حذف هذه النسخة نهائيًا']),
+        /operation id was reused|different request|request parameters/,
+      );
+      assert.equal((await historyRows(ctx.db)).length, 1, 'the old request must not touch another row');
+      assert.equal(Number((await historyRows(ctx.db))[0].id), Number(survivor.id));
+    } finally {
+      await a.end();
+      await b.end();
+    }
+  });
+
+  test('حذف سجل واحد مع مسح شامل متزامن: لا فقد مزدوج ولا نتيجة ناقصة', async (t) => {
+    const ctx = await createTestDb(t);
+    const a = await session(ctx.name, 'authenticated', ADMIN_ID);
+    const b = await session(ctx.name, 'authenticated', ADMIN_ID);
+
+    try {
+      await call(a, PUBLISH_SQL, [1, null, JSON.stringify(contentWith('v2')), null, randomUUID()]);
+      await call(a, PUBLISH_SQL, [2, null, JSON.stringify(contentWith('v3')), null, randomUUID()]);
+      const target = (await historyRows(ctx.db)).find((row) => row.version === 1);
+      assert.ok(target);
+
+      await a.query('begin');
+      const deleted = await call(a, DELETE_HISTORY_SQL, [target.id, randomUUID(), 'حذف هذه النسخة نهائيًا']);
+      assert.equal(Number(deleted.history_id), Number(target.id));
+      await waitForAdvisoryLock(ctx.db, a.processID);
+
+      await b.query('begin');
+      const clearPromise = call(b, CLEAR_HISTORY_SQL, [randomUUID(), 'حذف السجل نهائيًا']);
+      await waitForBlocked(ctx.db, b.processID, a.processID);
+
+      await a.query('commit');
+      const cleared = await clearPromise;
+      await b.query('commit');
+
+      assert.equal(cleared.deleted_count, 2, 'the bulk clear must only report rows it actually removed');
+      assert.equal(await count(ctx.db, 'content_history'), 0);
+      assert.equal((await state(ctx.db)).version, 3, 'history cleanup must not change published content');
     } finally {
       await a.end();
       await b.end();
