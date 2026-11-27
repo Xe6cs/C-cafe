@@ -284,8 +284,11 @@ function adminRoutes(overrides = {}) {
     ...(overrides.restoreRpc ? [{ match: '/rest/v1/rpc/admin_restore', reply: overrides.restoreRpc }] : []),
     ...(overrides.beginCheck ? [{ match: '/rest/v1/rpc/admin_begin_public_check', reply: overrides.beginCheck }] : []),
     ...(overrides.finishCheck ? [{ match: '/rest/v1/rpc/admin_finish_public_check', reply: overrides.finishCheck }] : []),
+    ...(overrides.siteStatus ? [{ match: '/rest/v1/rpc/admin_site_status', reply: overrides.siteStatus }] : []),
+    ...(overrides.siteStatusSet ? [{ match: '/rest/v1/rpc/admin_set_site_status', reply: overrides.siteStatusSet }] : []),
     ...(overrides.analyticsSnapshot ? [{ match: '/rest/v1/rpc/admin_analytics_snapshot', reply: overrides.analyticsSnapshot }] : []),
     ...(overrides.analyticsClear ? [{ match: '/rest/v1/rpc/admin_analytics_clear', reply: overrides.analyticsClear }] : []),
+    ...(overrides.historyClear ? [{ match: '/rest/v1/rpc/admin_clear_content_history', reply: overrides.historyClear }] : []),
     ...(overrides.mediaAsset ? [{ match: 'id=eq.', reply: overrides.mediaAsset }] : []),
     ...(overrides.mediaApproved ? [{ match: 'status=eq.approved', reply: overrides.mediaApproved }] : []),
     ...(overrides.mediaList ? [{ match: '/rest/v1/media_assets', reply: overrides.mediaList }] : []),
@@ -1027,6 +1030,249 @@ test('verify reports superseded when a newer check wins', async () => {
     const body = JSON.parse((await handler(event)).body);
     assert.equal(body.state, 'superseded');
     assert.equal(body.applied, false);
+  } finally {
+    restore();
+  }
+});
+
+test('site status read returns admin-only fields through the RPC with the user JWT', async () => {
+  configure();
+  const value = {
+    state: 'running',
+    message: '',
+    revision: 1,
+    updated_at: '2026-11-26T12:00:00+00:00',
+    changed_by: { id: USER_ID, email: 'admin@example.com' },
+  };
+  const calls = installFetch(adminRoutes({ siteStatus: reply(value) }));
+
+  try {
+    const result = await handler(adminEvent('/api/admin/site-status'));
+    assert.equal(result.statusCode, 200);
+    assertPrivateHeaders(result);
+    const body = JSON.parse(result.body);
+    assert.equal(body.state, 'running');
+    assert.equal(body.message, '');
+    assert.equal(body.revision, 1);
+    assert.equal(body.updated_at, value.updated_at);
+    assert.deepEqual(body.changed_by, value.changed_by);
+    assert.ok(typeof body.server_time === 'string');
+
+    const head = await handler(adminEvent('/api/admin/site-status', 'HEAD'));
+    assert.equal(head.statusCode, 200);
+    assert.equal(head.body, '');
+
+    const rpcCalls = calls.filter((call) => call.url.includes('/rest/v1/rpc/admin_site_status'));
+    assert.equal(rpcCalls.length, 2);
+    assert.deepEqual(JSON.parse(rpcCalls[0].init.body), {});
+    assert.equal(rpcCalls[0].init.headers.Authorization, `Bearer ${TOKEN}`);
+    assert.equal(rpcCalls[0].init.headers.apikey, ANON);
+  } finally {
+    restore();
+  }
+});
+
+test('admin APIs remain available while the public site state is stopped', async () => {
+  configure();
+  const stopped = {
+    state: 'stopped',
+    message: 'صيانة',
+    revision: 2,
+    updated_at: '2026-11-26T12:10:00+00:00',
+    changed_by: { id: USER_ID, email: 'admin@example.com' },
+  };
+  const restarted = {
+    state: 'running',
+    message: '',
+    revision: 3,
+    updated_at: '2026-11-26T12:15:00+00:00',
+    changed_by: { id: USER_ID, email: 'admin@example.com' },
+    operation_id: OPERATION_ID,
+    idempotent: false,
+  };
+  const calls = installFetch(adminRoutes({
+    draft: reply([DRAFT_ROW]),
+    siteStatus: reply(stopped),
+    siteStatusSet: reply(restarted),
+  }));
+
+  try {
+    for (const path of ['/api/admin/bootstrap', '/api/admin/history', '/api/admin/preview', '/api/admin/site-status']) {
+      const result = await handler(adminEvent(path));
+      assert.equal(result.statusCode, 200, path);
+      assertPrivateHeaders(result);
+    }
+
+    const read = JSON.parse((await handler(adminEvent('/api/admin/site-status'))).body);
+    assert.equal(read.state, 'stopped');
+    assert.equal(read.message, 'صيانة');
+    assert.equal(read.revision, 2);
+
+    const write = await handler(adminEvent('/api/admin/site-status', 'POST', TOKEN, {
+      state: 'running',
+      message: '',
+      expected_revision: 2,
+      operation_id: OPERATION_ID,
+    }));
+    assert.equal(write.statusCode, 200);
+    assert.equal(JSON.parse(write.body).state, 'running');
+
+    assert.equal(calls.some((call) => call.url.includes('/rest/v1/public_site_status')), false);
+    assert.equal(calls.some((call) => call.url.includes('c-cafe-preview.netlify.app')), false);
+  } finally {
+    restore();
+  }
+});
+
+test('site status write forwards the validated request and accepts an idempotent replay', async () => {
+  configure();
+  const request = {
+    state: 'stopped',
+    message: 'نعمل على الصيانة',
+    expected_revision: 1,
+    operation_id: OPERATION_ID,
+  };
+  const stored = {
+    state: 'stopped',
+    message: request.message,
+    revision: 2,
+    updated_at: '2026-11-26T12:05:00+00:00',
+    changed_by: { id: USER_ID, email: 'admin@example.com' },
+    operation_id: OPERATION_ID,
+    idempotent: false,
+  };
+  let writes = 0;
+  const calls = installFetch(adminRoutes({
+    siteStatusSet(url, init) {
+      writes += 1;
+      assert.equal(writes <= 2, true);
+      return reply(writes === 1 ? stored : { ...stored, idempotent: true });
+    },
+  }));
+
+  try {
+    for (const idempotent of [false, true]) {
+      const result = await handler(adminEvent('/api/admin/site-status', 'POST', TOKEN, request));
+      assert.equal(result.statusCode, 200);
+      const body = JSON.parse(result.body);
+      assert.equal(body.state, 'stopped');
+      assert.equal(body.message, request.message);
+      assert.equal(body.revision, 2);
+      assert.equal(body.operation_id, OPERATION_ID);
+      assert.equal(body.idempotent, idempotent);
+    }
+    assert.equal(writes, 2);
+
+    const sent = JSON.parse(calls.find((call) => call.url.includes('/rpc/admin_set_site_status')).init.body);
+    assert.deepEqual(sent, {
+      p_state: 'stopped',
+      p_message: 'نعمل على الصيانة',
+      p_expected_revision: 1,
+      p_operation_id: OPERATION_ID,
+    });
+  } finally {
+    restore();
+  }
+});
+
+test('site status write rejects unsafe requests before calling the write RPC', async () => {
+  configure();
+  let writes = 0;
+  const calls = installFetch(adminRoutes({
+    siteStatusSet() {
+      writes += 1;
+      throw new Error('write RPC must not be called');
+    },
+  }));
+
+  const invalid = [
+    {},
+    { state: 'paused', message: '', expected_revision: 1, operation_id: OPERATION_ID },
+    { state: 'running', message: 'يجب ألا تظهر', expected_revision: 1, operation_id: OPERATION_ID },
+    { state: 'stopped', message: 'x'.repeat(301), expected_revision: 1, operation_id: OPERATION_ID },
+    { state: 'stopped', message: 7, expected_revision: 1, operation_id: OPERATION_ID },
+    { state: 'stopped', message: '', expected_revision: 0, operation_id: OPERATION_ID },
+    { state: 'stopped', message: '', expected_revision: 1.5, operation_id: OPERATION_ID },
+    { state: 'stopped', message: '', expected_revision: 1, operation_id: 'not-a-uuid' },
+  ];
+
+  try {
+    for (const body of invalid) {
+      const result = await handler(adminEvent('/api/admin/site-status', 'POST', TOKEN, body));
+      assert.equal(result.statusCode, 422);
+      assert.deepEqual(JSON.parse(result.body), { error: 'invalid_request' });
+    }
+    const huge = await handler(adminEvent('/api/admin/site-status', 'POST', TOKEN, 'x'.repeat(2 * 1024 * 1024 + 1)));
+    assert.equal(huge.statusCode, 413);
+    assert.equal(writes, 0);
+    assert.equal(calls.some((call) => call.url.includes('/rpc/admin_set_site_status')), false);
+  } finally {
+    restore();
+  }
+});
+
+test('site status write maps auth, conflict, validation, and upstream failures', async () => {
+  configure();
+  const request = {
+    state: 'stopped',
+    message: '',
+    expected_revision: 1,
+    operation_id: OPERATION_ID,
+  };
+  const cases = [
+    [reply({ code: '28000' }, 401), 401],
+    [reply({ code: '42501' }, 403), 403],
+    [reply({ code: 'PT409', message: 'stale site status revision' }, 400), 409],
+    [reply({ code: '22023', message: 'invalid site state' }, 400), 422],
+    [reply({}, 500), 502],
+  ];
+
+  try {
+    for (const [siteStatusSet, expected] of cases) {
+      installFetch(adminRoutes({ siteStatusSet }));
+      const result = await handler(adminEvent('/api/admin/site-status', 'POST', TOKEN, request));
+      assert.equal(result.statusCode, expected);
+    }
+
+    installFetch(adminRoutes({ siteStatus: reply({ state: 'running' }) }));
+    assert.equal((await handler(adminEvent('/api/admin/site-status'))).statusCode, 502);
+  } finally {
+    restore();
+  }
+});
+
+test('verify never treats a stop page or an indeterminate state as published-content proof', async () => {
+  configure();
+  process.env.CCAFE_VERIFY_ORIGIN = 'https://c-cafe-preview.netlify.app';
+
+  const pages = [
+    [htmlReply(503, '<html><head><meta name="ccafe-site-state" content="stopped"></head></html>', {}), 'site_stopped', 'stopped'],
+    [htmlReply(503, '', { 'X-CCafe-Site-State': 'unknown' }), 'site_state_unknown', 'unknown'],
+  ];
+
+  try {
+    for (const [site, detail, siteState] of pages) {
+      const calls = installFetch(adminRoutes({
+        beginCheck: reply(17),
+        finishCheck: reply(true),
+        site,
+      }));
+      const event = adminEvent('/api/admin/verify');
+      event.queryStringParameters = { version: '244' };
+      const result = await handler(event);
+      assert.equal(result.statusCode, 200);
+      const body = JSON.parse(result.body);
+      assert.equal(body.state, 'mismatch');
+      assert.equal(body.applied, true);
+      assert.equal(body.detail, detail);
+      assert.equal(body.site_state, siteState);
+      assert.equal(body.observed_version, null);
+
+      const finish = JSON.parse(calls.find((call) => call.url.includes('/rpc/admin_finish_public_check')).init.body);
+      assert.equal(finish.p_state, 'mismatch');
+      assert.equal(finish.p_detail, detail);
+      assert.equal(finish.p_observed_version, null);
+    }
   } finally {
     restore();
   }
@@ -2729,6 +2975,86 @@ test('clearing analytics is limited to the server-selected environment', async (
     delete process.env.CCAFE_ANALYTICS_ENV;
     const disabled = await handler(adminEvent('/api/admin/analytics/clear', 'POST', TOKEN, {}));
     assert.equal(disabled.statusCode, 503);
+  } finally {
+    restore();
+  }
+});
+
+test('history clear requires explicit confirmation and forwards idempotent RPC call', async () => {
+  configure();
+  const operationId = '55555555-5555-4555-8555-555555555555';
+  const calls = installFetch(adminRoutes({
+    historyClear: reply({
+      operation_id: operationId,
+      deleted_count: 12,
+      boundary_version: 260,
+      boundary_id: 9001,
+      cleared_at: '2026-11-27T12:00:00+00:00',
+    }),
+  }));
+
+  try {
+    for (const body of [
+      {},
+      { operation_id: operationId },
+      { confirmation: 'حذف السجل نهائيًا' },
+      { operation_id: operationId, confirmation: 'حذف السجل' },
+      { operation_id: 'not-a-uuid', confirmation: 'حذف السجل نهائيًا' },
+    ]) {
+      const result = await handler(adminEvent('/api/admin/history/clear', 'POST', TOKEN, body));
+      assert.equal(result.statusCode, 400);
+      assert.deepEqual(JSON.parse(result.body), { error: 'invalid_request' });
+    }
+    assert.equal(calls.some((call) => call.url.includes('/rpc/admin_clear_content_history')), false);
+
+    const result = await handler(adminEvent('/api/admin/history/clear', 'POST', TOKEN, {
+      operation_id: operationId,
+      confirmation: 'حذف السجل نهائيًا',
+    }));
+    assert.equal(result.statusCode, 200);
+    assert.deepEqual(JSON.parse(result.body), {
+      operation_id: operationId,
+      deleted_count: 12,
+      boundary_version: 260,
+      boundary_id: 9001,
+      cleared_at: '2026-11-27T12:00:00+00:00',
+    });
+
+    const rpc = calls.find((call) => call.url.includes('/rpc/admin_clear_content_history'));
+    assert.equal(rpc.init.method, 'POST');
+    assert.deepEqual(JSON.parse(rpc.init.body), {
+      p_operation_id: operationId,
+      p_confirmation: 'حذف السجل نهائيًا',
+    });
+  } finally {
+    restore();
+  }
+});
+
+test('history clear maps admin, conflict, and invalid upstream errors', async () => {
+  configure();
+  const operationId = '66666666-6666-4666-8666-666666666666';
+  try {
+    installFetch(adminRoutes({ historyClear: reply({ code: '42501', message: 'admin only' }, 403) }));
+    const forbidden = await handler(adminEvent('/api/admin/history/clear', 'POST', TOKEN, {
+      operation_id: operationId,
+      confirmation: 'حذف السجل نهائيًا',
+    }));
+    assert.equal(forbidden.statusCode, 403);
+
+    installFetch(adminRoutes({ historyClear: reply({ code: 'PT409', message: 'stale' }, 409) }));
+    const conflict = await handler(adminEvent('/api/admin/history/clear', 'POST', TOKEN, {
+      operation_id: operationId,
+      confirmation: 'حذف السجل نهائيًا',
+    }));
+    assert.equal(conflict.statusCode, 409);
+
+    installFetch(adminRoutes({ historyClear: reply({ code: '22023', message: 'invalid' }, 400) }));
+    const invalid = await handler(adminEvent('/api/admin/history/clear', 'POST', TOKEN, {
+      operation_id: operationId,
+      confirmation: 'حذف السجل نهائيًا',
+    }));
+    assert.equal(invalid.statusCode, 422);
   } finally {
     restore();
   }

@@ -57,6 +57,21 @@ function assetRows(rows) {
   };
 }
 
+function statusRows(state = 'running', message = '') {
+  return assetRows([{ state, message }]);
+}
+
+function routeFetch(routes) {
+  return async (url, init = {}) => {
+    const pathname = new URL(String(url)).pathname;
+    if (!Object.prototype.hasOwnProperty.call(routes, pathname)) {
+      throw new Error(`unexpected fetch: ${pathname}`);
+    }
+    const value = routes[pathname];
+    return typeof value === 'function' ? value(url, init) : value;
+  };
+}
+
 test('live: renders actual version, content, and no analytics', async () => {
   process.env.SUPABASE_URL = 'https://example.supabase.co';
   process.env.SUPABASE_ANON_KEY = 'anon-test-key';
@@ -64,7 +79,10 @@ test('live: renders actual version, content, and no analytics', async () => {
   delete process.env.CCAFE_PREVIEW_ONLY;
   delete process.env.CONTEXT;
   const content = contentWith('محتوى حي للاختبار');
-  global.fetch = async () => liveRows(content, 243);
+  global.fetch = routeFetch({
+    '/rest/v1/public_site_status': statusRows(),
+    '/rest/v1/published_content': liveRows(content, 243),
+  });
 
   try {
     const result = await handler({ path: '/', httpMethod: 'GET' });
@@ -91,7 +109,10 @@ test('preview: live responses are noindex only when the preview flag is set', as
   delete process.env.CCAFE_SUPABASE_TIMEOUT_MS;
   process.env.CCAFE_PREVIEW_ONLY = '1';
   delete process.env.CONTEXT;
-  global.fetch = async () => liveRows(contentWith('preview content'), 244);
+  global.fetch = routeFetch({
+    '/rest/v1/public_site_status': statusRows(),
+    '/rest/v1/published_content': liveRows(contentWith('preview content'), 244),
+  });
 
   try {
     const result = await handler({ path: '/', httpMethod: 'GET' });
@@ -113,9 +134,12 @@ test('fallback: fetch failure is marked and never claims a live version', async 
   delete process.env.CCAFE_SUPABASE_TIMEOUT_MS;
   delete process.env.CCAFE_PREVIEW_ONLY;
   delete process.env.CONTEXT;
-  global.fetch = async () => {
-    throw new Error('network down');
-  };
+  global.fetch = routeFetch({
+    '/rest/v1/public_site_status': statusRows(),
+    '/rest/v1/published_content'() {
+      throw new Error('network down');
+    },
+  });
 
   try {
     const result = await handler({ path: '/index.html', httpMethod: 'GET' });
@@ -134,12 +158,9 @@ test('fallback: fetch failure is marked and never claims a live version', async 
 test('fallback: invalid payload is rejected', async () => {
   process.env.SUPABASE_URL = 'https://example.supabase.co';
   process.env.SUPABASE_ANON_KEY = 'anon-test-key';
-  global.fetch = async () => ({
-    ok: true,
-    status: 200,
-    async json() {
-      return { nope: true };
-    },
+  global.fetch = routeFetch({
+    '/rest/v1/public_site_status': statusRows(),
+    '/rest/v1/published_content': assetRows({ nope: true }),
   });
 
   try {
@@ -155,14 +176,18 @@ test('fallback: read timeout is reported as timeout', async () => {
   process.env.SUPABASE_URL = 'https://example.supabase.co';
   process.env.SUPABASE_ANON_KEY = 'anon-test-key';
   process.env.CCAFE_SUPABASE_TIMEOUT_MS = '30';
-  global.fetch = (url, options) =>
-    new Promise((resolve, reject) => {
-      options.signal.addEventListener('abort', () => {
-        const error = new Error('aborted');
-        error.name = 'AbortError';
-        reject(error);
+  global.fetch = routeFetch({
+    '/rest/v1/public_site_status': statusRows(),
+    '/rest/v1/published_content'(url, options) {
+      return new Promise((resolve, reject) => {
+        options.signal.addEventListener('abort', () => {
+          const error = new Error('aborted');
+          error.name = 'AbortError';
+          reject(error);
+        });
       });
-    });
+    },
+  });
 
   try {
     const result = await handler({ path: '/', httpMethod: 'GET' });
@@ -185,7 +210,9 @@ test('fallback: missing configuration does not call the network', async () => {
   try {
     const result = await handler({ path: '/', httpMethod: 'GET' });
     assert.equal(called, false);
-    assert.equal(result.headers['X-CCafe-Source'], 'fallback');
+    assert.equal(result.statusCode, 503);
+    assert.equal(result.headers['X-CCafe-Source'], 'unavailable');
+    assert.equal(result.headers['X-CCafe-Site-State'], 'unknown');
     assert.equal(result.headers['X-CCafe-Reason'], 'missing-config');
   } finally {
     restore();
@@ -213,6 +240,7 @@ test('live: published media resolves to the public bucket with no signed URL', a
     const parsed = new URL(String(url));
     calls.push(parsed);
     headers.push({ url: parsed, init });
+    if (parsed.pathname === '/rest/v1/public_site_status') return statusRows();
     if (parsed.pathname === '/rest/v1/published_content') return liveRows(content, 250);
     if (parsed.pathname === '/rest/v1/media_public_assets') {
       return assetRows([
@@ -261,6 +289,7 @@ test('live: a failed public-asset read falls back without leaking private refs',
   content.hero.mark = `media/${assetId}`;
   global.fetch = async (url) => {
     const parsed = new URL(String(url));
+    if (parsed.pathname === '/rest/v1/public_site_status') return statusRows();
     if (parsed.pathname === '/rest/v1/published_content') return liveRows(content, 251);
     return { ok: false, status: 500, async json() { return null; } };
   };
@@ -279,7 +308,10 @@ test('live: a failed public-asset read falls back without leaking private refs',
 test('only GET/HEAD page routes are served; analytics and other paths are 404', async () => {
   process.env.SUPABASE_URL = 'https://example.supabase.co';
   process.env.SUPABASE_ANON_KEY = 'anon-test-key';
-  global.fetch = async () => liveRows(contentWith('ok'), 7);
+  global.fetch = routeFetch({
+    '/rest/v1/public_site_status': statusRows(),
+    '/rest/v1/published_content': liveRows(contentWith('ok'), 7),
+  });
 
   try {
     const track = await handler({ path: '/api/track', httpMethod: 'GET' });
@@ -305,7 +337,10 @@ test('live: tracking loads only when CCAFE_ANALYTICS_ENV is explicit', async () 
   delete process.env.CCAFE_PREVIEW_ONLY;
   delete process.env.CONTEXT;
   const content = contentWith('تحليلات');
-  global.fetch = async () => liveRows(content, 250);
+  global.fetch = routeFetch({
+    '/rest/v1/public_site_status': statusRows(),
+    '/rest/v1/published_content': liveRows(content, 250),
+  });
 
   try {
     delete process.env.CCAFE_ANALYTICS_ENV;
@@ -338,12 +373,184 @@ test('fallback never loads tracking even when analytics is configured', async ()
   process.env.SUPABASE_URL = 'https://example.supabase.co';
   process.env.SUPABASE_ANON_KEY = 'anon-test-key';
   process.env.CCAFE_ANALYTICS_ENV = 'preview';
-  global.fetch = async () => ({ ok: false, status: 500 });
+  global.fetch = routeFetch({
+    '/rest/v1/public_site_status': statusRows(),
+    '/rest/v1/published_content': { ok: false, status: 500, async json() { return null; } },
+  });
 
   try {
     const result = await handler({ path: '/', httpMethod: 'GET' });
     assert.equal(result.headers['X-CCafe-Source'], 'fallback');
     assert.doesNotMatch(result.body, /track\.js/);
+  } finally {
+    restore();
+  }
+});
+
+test('stopped: returns a content-free server-rendered 503 page with escaped message', async () => {
+  process.env.SUPABASE_URL = 'https://example.supabase.co';
+  process.env.SUPABASE_ANON_KEY = 'anon-test-key';
+  delete process.env.CCAFE_SUPABASE_TIMEOUT_MS;
+  delete process.env.CCAFE_PREVIEW_ONLY;
+  delete process.env.CONTEXT;
+  delete process.env.CCAFE_ANALYTICS_ENV;
+  const message = '<b>ختم</b> & "اقتباس" \'مفرد\'';
+  let publishedCalled = false;
+  global.fetch = routeFetch({
+    '/rest/v1/public_site_status': statusRows('stopped', message),
+    '/rest/v1/published_content'() {
+      publishedCalled = true;
+      throw new Error('published content must not be read while stopped');
+    },
+  });
+
+  try {
+    const result = await handler({ path: '/', httpMethod: 'GET' });
+    assert.equal(result.statusCode, 503);
+    assert.equal(result.headers['X-CCafe-Source'], 'unavailable');
+    assert.equal(result.headers['X-CCafe-Site-State'], 'stopped');
+    assert.equal(result.headers['X-CCafe-Reason'], 'site_stopped');
+    assert.equal(result.headers['Retry-After'], '300');
+    assert.equal(result.headers['X-Robots-Tag'], 'noindex, nofollow');
+    assert.equal(result.headers['Cache-Control'], 'no-store, max-age=0');
+    assert.equal(result.headers['Netlify-CDN-Cache-Control'], 'no-store');
+    assert.match(result.headers['Content-Security-Policy'], /default-src 'none'/);
+    assert.match(result.body, /<meta name="viewport" content="width=device-width, initial-scale=1">/);
+    assert.match(result.body, /<meta name="ccafe-site-state" content="stopped">/);
+    assert.match(result.body, /الموقع متوقف مؤقتًا/);
+    assert.match(result.body, /&lt;b&gt;ختم&lt;\/b&gt; &amp; &quot;اقتباس&quot; &#39;مفرد&#39;/);
+    assert.doesNotMatch(result.body, /<b>ختم<\/b>/);
+    assert.doesNotMatch(result.body, /ccafe-content-version/);
+    assert.doesNotMatch(result.body, /<script/i);
+    assert.doesNotMatch(result.body, /track\.js/);
+    assert.doesNotMatch(result.body, /api\/track/);
+    assert.doesNotMatch(result.body, /https?:\/\//);
+    assert.doesNotMatch(result.body, /\/storage\//);
+    assert.equal(publishedCalled, false);
+  } finally {
+    restore();
+  }
+});
+
+test('stopped: all public page paths and HEAD use the same stop response', async () => {
+  process.env.SUPABASE_URL = 'https://example.supabase.co';
+  process.env.SUPABASE_ANON_KEY = 'anon-test-key';
+  delete process.env.CCAFE_SUPABASE_TIMEOUT_MS;
+  delete process.env.CCAFE_PREVIEW_ONLY;
+  delete process.env.CONTEXT;
+  const requests = [];
+  global.fetch = async (url, init = {}) => {
+    const parsed = new URL(String(url));
+    requests.push({ parsed, init });
+    return statusRows('stopped', '');
+  };
+
+  try {
+    for (const path of ['/', '/index.html', '/.netlify/functions/site']) {
+      const result = await handler({ path, httpMethod: 'GET' });
+      assert.equal(result.statusCode, 503);
+      assert.equal(result.headers['X-CCafe-Site-State'], 'stopped');
+      assert.match(result.body, /الموقع متوقف مؤقتًا/);
+    }
+    const head = await handler({ path: '/', httpMethod: 'HEAD' });
+    assert.equal(head.statusCode, 503);
+    assert.equal(head.body, '');
+    assert.equal(head.headers['X-CCafe-Site-State'], 'stopped');
+
+    const statusCall = requests.find((entry) => entry.parsed.pathname === '/rest/v1/public_site_status');
+    assert.ok(statusCall);
+    assert.equal(statusCall.parsed.searchParams.get('select'), 'state,message');
+    assert.equal(statusCall.parsed.searchParams.get('limit'), '1');
+    assert.equal(statusCall.init.headers.apikey, 'anon-test-key');
+    assert.equal(statusCall.init.headers.Authorization, 'Bearer anon-test-key');
+    assert.equal(requests.every((entry) => !entry.parsed.pathname.includes('published_content')), true);
+  } finally {
+    restore();
+  }
+});
+
+test('unknown or invalid site state fails closed without using published or fallback content', async () => {
+  process.env.SUPABASE_URL = 'https://example.supabase.co';
+  process.env.SUPABASE_ANON_KEY = 'anon-test-key';
+  delete process.env.CCAFE_SUPABASE_TIMEOUT_MS;
+
+  for (const status of [statusRows('paused', ''), statusRows('stopped', 'x'.repeat(301)), { ok: false, status: 500, async json() { return null; } }]) {
+    let publishedCalled = false;
+    global.fetch = routeFetch({
+      '/rest/v1/public_site_status': status,
+      '/rest/v1/published_content'() {
+        publishedCalled = true;
+        throw new Error('published content must not be read for an unknown state');
+      },
+    });
+
+    try {
+      const result = await handler({ path: '/', httpMethod: 'GET' });
+      assert.equal(result.statusCode, 503);
+      assert.equal(result.headers['X-CCafe-Site-State'], 'unknown');
+      assert.equal(result.headers['X-CCafe-Source'], 'unavailable');
+      assert.match(result.body, /الموقع غير متاح مؤقتًا/);
+      assert.doesNotMatch(result.body, /ccafe-content-version/);
+      assert.equal(publishedCalled, false);
+    } finally {
+      restore();
+    }
+  }
+});
+
+test('stopped: the public Function does not intercept admin or API paths', async () => {
+  process.env.SUPABASE_URL = 'https://example.supabase.co';
+  process.env.SUPABASE_ANON_KEY = 'anon-test-key';
+  delete process.env.CCAFE_SUPABASE_TIMEOUT_MS;
+  let called = false;
+  global.fetch = async () => {
+    called = true;
+    throw new Error('admin and API paths must not read site state');
+  };
+
+  try {
+    for (const path of ['/admin/', '/admin/app.js', '/api/admin/site-status', '/api/track']) {
+      const result = await handler({ path, httpMethod: 'GET' });
+      assert.equal(result.statusCode, 404, path);
+      assert.equal(result.body, 'Not Found', path);
+    }
+    assert.equal(called, false);
+  } finally {
+    restore();
+  }
+});
+
+test('a later status-read failure fails closed even after a running response', async () => {
+  process.env.SUPABASE_URL = 'https://example.supabase.co';
+  process.env.SUPABASE_ANON_KEY = 'anon-test-key';
+  delete process.env.CCAFE_SUPABASE_TIMEOUT_MS;
+  const content = contentWith('live-before-failure');
+  let publishedCalled = false;
+
+  try {
+    global.fetch = routeFetch({
+      '/rest/v1/public_site_status': statusRows('running'),
+      '/rest/v1/published_content': liveRows(content, 7),
+    });
+    const live = await handler({ path: '/', httpMethod: 'GET' });
+    assert.equal(live.statusCode, 200);
+    assert.equal(live.headers['X-CCafe-Source'], 'live');
+    assert.match(live.body, /live-before-failure/);
+
+    global.fetch = routeFetch({
+      '/rest/v1/public_site_status': { ok: false, status: 500, async json() { return null; } },
+      '/rest/v1/published_content'() {
+        publishedCalled = true;
+        throw new Error('a failed status read must never fall through to content');
+      },
+    });
+    const unknown = await handler({ path: '/', httpMethod: 'GET' });
+    assert.equal(unknown.statusCode, 503);
+    assert.equal(unknown.headers['X-CCafe-Site-State'], 'unknown');
+    assert.equal(unknown.headers['X-CCafe-Reason'], 'http-500');
+    assert.equal(unknown.headers['X-CCafe-Source'], 'unavailable');
+    assert.doesNotMatch(unknown.body, /live-before-failure|ccafe-content-version/);
+    assert.equal(publishedCalled, false);
   } finally {
     restore();
   }

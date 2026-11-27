@@ -8,7 +8,15 @@
 //   * includes track.js only when CCAFE_ANALYTICS_ENV is explicitly
 //     'preview' or 'production'; the destination is /api/track.
 //
-// Failure behaviour:
+// Site state:
+//   * public_site_status is read FIRST, using the anon key only;
+//   * 'stopped' returns a minimal 503 page with no published content, no assets,
+//     no tracking, and no external resources;
+//   * any status read/validation failure is fail-closed with the same 503 page,
+//     so an unknown state can never fall through to live or fallback content;
+//   * the static fallback snapshot is used only after an explicit 'running' read.
+//
+// Failure behaviour (after a confirmed 'running' state):
 //   * a 5s timeout (CCAFE_SUPABASE_TIMEOUT_MS override) and any fetch/parse/
 //     validation error fall back to the static snapshot in
 //     content-fallback.json;
@@ -35,6 +43,10 @@ const DEFAULT_TIMEOUT_MS = 5000;
 const PAGE_PATHS = new Set(['', '/', '/index.html', '/.netlify/functions/site']);
 const PUBLIC_MEDIA_BUCKET = 'ccafe-public';
 const PUBLIC_MEDIA_PATH_RE = /^published\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/[0-9a-f]{64}$/;
+const MAX_SITE_MESSAGE_CHARS = 300;
+// Best-effort hint only. The admin never sets an estimated recovery time, so
+// this is deliberately a conservative fixed value rather than a promise.
+const RETRY_AFTER_SECONDS = 300;
 
 const BASE_HEADERS = {
   'Content-Type': 'text/html; charset=utf-8',
@@ -125,6 +137,125 @@ async function readPublished(config) {
   return { version: row.version, content: row.content };
 }
 
+// Public read surface: only state and message. It deliberately does not ask for
+// revision, timestamps, actor identity, content, or audit rows.
+async function readSiteStatus(config) {
+  let endpoint;
+  try {
+    endpoint = new URL('/rest/v1/public_site_status', config.base);
+  } catch {
+    throw reasonError('invalid-config');
+  }
+  if (!/^https?:$/.test(endpoint.protocol)) throw reasonError('invalid-config');
+  endpoint.searchParams.set('select', 'state,message');
+  endpoint.searchParams.set('limit', '1');
+
+  const rows = await getJson(endpoint, config.anonKey);
+  if (!Array.isArray(rows) || rows.length !== 1) throw reasonError('invalid-data');
+  const row = rows[0];
+  if (!isPlainObject(row)) throw reasonError('invalid-data');
+  if (row.state !== 'running' && row.state !== 'stopped') throw reasonError('invalid-data');
+  if (typeof row.message !== 'string' || [...row.message].length > MAX_SITE_MESSAGE_CHARS) {
+    throw reasonError('invalid-data');
+  }
+  return { state: row.state, message: row.message };
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// A self-contained, mobile-friendly page. No external CSS/fonts/scripts, no
+// published content, no tracking reference, and no content-version marker.
+function stoppedHtml(state, message) {
+  const isStopped = state === 'stopped';
+  const title = isStopped ? 'الموقع متوقف مؤقتًا' : 'الموقع غير متاح مؤقتًا';
+  const lead = isStopped
+    ? 'نعمل على إعادة الموقع قريبًا. شكرًا لصبركم.'
+    : 'تعذّر عرض الموقع الآن. يُرجى المحاولة لاحقًا.';
+  const notice = typeof message === 'string' && message.trim() !== ''
+    ? `<p class="message" dir="rtl">${escapeHtml(message)}</p>`
+    : '';
+
+  return `<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="ccafe-site-state" content="${state}">
+  <title>سي كافيه — ${title}</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100svh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: #17130f;
+      color: #fff6ec;
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      line-height: 1.8;
+    }
+    main { width: min(100%, 420px); }
+    .card {
+      border: 1px solid rgba(255, 246, 236, 0.16);
+      border-radius: 18px;
+      background: #241d16;
+      padding: 28px 24px;
+      text-align: center;
+    }
+    .brand { margin: 0 0 8px; color: #fa6a04; font-weight: 700; letter-spacing: 0.02em; }
+    h1 { margin: 0 0 10px; font-size: 1.45rem; line-height: 1.4; }
+    p { margin: 0; font-size: 0.95rem; color: rgba(255, 246, 236, 0.78); }
+    .message {
+      margin-top: 20px;
+      padding-top: 18px;
+      border-top: 1px solid rgba(255, 246, 236, 0.14);
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      color: #fff6ec;
+    }
+    @media (max-width: 360px) { .card { padding: 22px 16px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="card">
+      <p class="brand">سي كافيه</p>
+      <h1>${title}</h1>
+      <p>${lead}</p>
+      ${notice}
+    </div>
+  </main>
+</body>
+</html>`;
+}
+
+function stoppedResponse(state, message, reason, method) {
+  return {
+    statusCode: 503,
+    headers: {
+      ...BASE_HEADERS,
+      'X-CCafe-Source': 'unavailable',
+      'X-CCafe-Site-State': state,
+      'X-CCafe-Reason': reason,
+      'Retry-After': String(RETRY_AFTER_SECONDS),
+      'X-Robots-Tag': 'noindex, nofollow',
+      'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'",
+    },
+    body: method === 'HEAD' ? '' : stoppedHtml(state, message),
+    isBase64Encoded: false,
+  };
+}
+
 // Anonymous resolution of approved uploads. The published content stores only
 // `media/<asset-uuid>`; this reads the ready, published-linked public copy with
 // the anon key and builds a permanent public URL. No signed URL ever enters the
@@ -209,11 +340,31 @@ exports.handler = async (event = {}) => {
   if (pathname.startsWith('/api/')) return notFound();
   if (!PAGE_PATHS.has(pathname)) return notFound();
 
+  let config;
+  try {
+    config = readSupabaseConfig();
+  } catch (error) {
+    const reason = (error && error.reason) || 'invalid-config';
+    console.error(`[ccafe-site] state unavailable: ${reason}`);
+    return stoppedResponse('unknown', '', reason, method);
+  }
+
+  let siteState;
+  try {
+    siteState = await readSiteStatus(config);
+  } catch (error) {
+    const reason = (error && error.reason) || 'fetch-error';
+    console.error(`[ccafe-site] state unavailable: ${reason}`);
+    return stoppedResponse('unknown', '', reason, method);
+  }
+  if (siteState.state === 'stopped') {
+    return stoppedResponse('stopped', siteState.message, 'site_stopped', method);
+  }
+
   let live = null;
   let assets = {};
   let reason = null;
   try {
-    const config = readSupabaseConfig();
     live = await readPublished(config);
     assets = await readPublicAssets(config, live.content);
   } catch (error) {

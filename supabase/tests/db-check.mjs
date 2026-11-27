@@ -40,6 +40,8 @@ const MIGRATIONS = [
   'supabase/migrations/20261114090000_analytics.sql',
   'supabase/migrations/20261115090000_analytics_digest_guard.sql',
   'supabase/migrations/20261116090000_analytics_day_cap.sql',
+  'supabase/migrations/20261126120000_site_status.sql',
+  'supabase/migrations/20261127120000_content_history_clear.sql',
 ];
 
 const ADMIN_ID = '11111111-1111-1111-1111-111111111111';
@@ -398,6 +400,29 @@ if (!PGlite) {
     return (await db.query(
       'select id, version, content, note from public.content_history order by version desc, id desc',
     )).rows;
+  }
+
+  const readSiteStatus = (db) =>
+    rpc(db, 'select public.admin_site_status() as result');
+
+  const setSiteStatus = (db, nextState, message, expectedRevision, operationId) =>
+    rpc(
+      db,
+      'select public.admin_set_site_status($1::text, $2::text, $3::bigint, $4::uuid) as result',
+      [nextState, message, expectedRevision, operationId],
+    );
+
+  const clearContentHistory = (db, operationId, confirmation = 'حذف السجل نهائيًا') =>
+    rpc(
+      db,
+      'select public.admin_clear_content_history($1::uuid, $2::text) as result',
+      [operationId, confirmation],
+    );
+
+  async function siteStatusRow(db) {
+    return (await db.query(
+      'select state, message, revision, updated_by from public.site_status where id = 1',
+    )).rows[0];
   }
 
   test('الزائر وغير المدير لا يستطيعان تنفيذ العمليات الإدارية', async (t) => {
@@ -2224,5 +2249,371 @@ if (!PGlite) {
     await assert.rejects(asVisitor(db, () => db.query('select public.analytics_purge_expired(90)')), /permission denied/);
     await assert.rejects(asAdmin(db, () => db.query('select public.analytics_purge_expired(90)')), /permission denied/);
     await assert.rejects(db.query('select public.analytics_purge_expired(0)'), /invalid retention/);
+  });
+
+  test('حالة الموقع: الافتراض يعمل والعرض العام يكشف الحالة والرسالة فقط', async (t) => {
+    const db = await createDb();
+    t.after(() => db.close());
+
+    const initial = await readSiteStatus(db);
+    assert.equal(initial.state, 'running');
+    assert.equal(initial.message, '');
+    assert.equal(initial.revision, 1);
+    assert.equal(initial.changed_by.id, null);
+    assert.equal(initial.changed_by.email, '');
+
+    const publicRows = await asVisitor(db, () => db.query('select * from public.public_site_status'));
+    assert.equal(publicRows.rows.length, 1);
+    assert.deepEqual(Object.keys(publicRows.rows[0]).sort(), ['message', 'state']);
+    assert.deepEqual(publicRows.rows[0], { state: 'running', message: '' });
+
+    const columns = await db.query(`
+      select column_name
+      from information_schema.columns
+      where table_schema = 'public' and table_name = 'public_site_status'
+      order by ordinal_position
+    `);
+    assert.deepEqual(columns.rows.map((row) => row.column_name), ['state', 'message']);
+
+    await assert.rejects(
+      asVisitor(db, () => db.query('select * from public.site_status')),
+      /permission denied/,
+    );
+    const userRows = await asUser(db, () => db.query('select * from public.site_status'));
+    assert.equal(userRows.rows.length, 0);
+    await assert.rejects(
+      asVisitor(db, () => db.query('select public.admin_site_status()')),
+      /permission denied/,
+    );
+    await assert.rejects(
+      asUser(db, () => db.query('select public.admin_site_status()')),
+      /admin only/,
+    );
+    await assert.rejects(
+      asUser(db, () => db.query(
+        'select public.admin_set_site_status($1::text, $2::text, $3::bigint, $4::uuid)',
+        ['stopped', '', 1, randomUUID()],
+      )),
+      /admin only/,
+    );
+    await assert.rejects(
+      asUser(db, () => db.query("update public.site_status set state = 'stopped' where id = 1")),
+      /permission denied/,
+    );
+    await assert.rejects(
+      asVisitor(db, () => db.query("update public.site_status set state = 'stopped' where id = 1")),
+      /permission denied/,
+    );
+  });
+
+  test('حالة الموقع: الإيقاف والإعادة لا يلمان المحتوى أو المسودات أو السجل أو الوسائط', async (t) => {
+    const db = await createDb();
+    t.after(() => db.close());
+
+    const contentBefore = await state(db);
+    const historyBefore = await historyRows(db);
+    const usersBefore = await count(db, 'admin_users');
+    const contentOperationsBefore = await count(db, 'content_operations');
+    const mediaBefore = await count(db, 'media_assets');
+
+    const stopped = await setSiteStatus(db, 'stopped', 'سنعود قريبًا', 1, randomUUID());
+    assert.equal(stopped.state, 'stopped');
+    assert.equal(stopped.message, 'سنعود قريبًا');
+    assert.equal(stopped.revision, 2);
+    assert.equal(stopped.changed_by.id, ADMIN_ID);
+    assert.equal(stopped.changed_by.email, 'admin@local.test');
+
+    const publicStopped = await asVisitor(db, () => db.query('select * from public.public_site_status'));
+    assert.deepEqual(publicStopped.rows[0], { state: 'stopped', message: 'سنعود قريبًا' });
+    assert.doesNotMatch(JSON.stringify(publicStopped.rows[0]), /revision|updated|changed_by|admin@local\.test/);
+
+    assert.deepEqual(await state(db), contentBefore);
+    assert.deepEqual(await historyRows(db), historyBefore);
+    assert.equal(await count(db, 'admin_users'), usersBefore);
+    assert.equal(await count(db, 'content_operations'), contentOperationsBefore);
+    assert.equal(await count(db, 'media_assets'), mediaBefore);
+
+    const restarted = await setSiteStatus(db, 'running', '', 2, randomUUID());
+    assert.equal(restarted.state, 'running');
+    assert.equal(restarted.message, '');
+    assert.equal(restarted.revision, 3);
+    assert.deepEqual(await state(db), contentBefore);
+    assert.deepEqual(await historyRows(db), historyBefore);
+
+    const published = await publish(
+      db,
+      contentBefore.version,
+      null,
+      contentWith('after-maintenance'),
+      'publish after restart',
+      randomUUID(),
+    );
+    assert.equal(published.version, contentBefore.version + 1);
+    const afterPublish = await readSiteStatus(db);
+    assert.equal(afterPublish.state, 'running');
+    assert.equal(afterPublish.revision, 3);
+  });
+
+  test('حذف سجل المحتوى: رفض anon وغير المدير، وتأكيد صريح مطلوب', async (t) => {
+    const db = await createDb();
+    t.after(() => db.close());
+
+    const op = randomUUID();
+    await assert.rejects(
+      asVisitor(db, () => db.query(
+        'select public.admin_clear_content_history($1::uuid, $2::text) as result',
+        [op, 'حذف السجل نهائيًا'],
+      )),
+      /permission denied/,
+    );
+    await assert.rejects(
+      asUser(db, () => db.query(
+        'select public.admin_clear_content_history($1::uuid, $2::text) as result',
+        [op, 'حذف السجل نهائيًا'],
+      )),
+      /admin only/,
+    );
+    await assert.rejects(
+      asAdmin(db, () => db.query(
+        'select public.admin_clear_content_history($1::uuid, $2::text) as result',
+        [randomUUID(), 'حذف السجل'],
+      )),
+      /confirmation is required/,
+    );
+    assert.equal(await count(db, 'content_history'), 1);
+  });
+
+  test('حذف سجل المحتوى: يحذف السجل فقط ويحفظ بقية الحالة', async (t) => {
+    const db = await createDb();
+    t.after(() => db.close());
+
+    const draft = await saveDraft(db, 1, null, contentWith('draft-kept'));
+    await publish(db, 1, draft.revision_id, null, 'publish 2', randomUUID());
+    await publish(db, 2, null, contentWith('publish 3'), 'publish 3', randomUUID());
+    const { approved } = await createReadyPublicAsset(db);
+    const stopped = await setSiteStatus(db, 'stopped', 'msg', 1, randomUUID());
+    assert.equal(stopped.state, 'stopped');
+
+    const before = {
+      site: await state(db),
+      draft: await draftRow(db),
+      history: await historyRows(db),
+      users: await count(db, 'admin_users'),
+      adminRows: (await db.query('select user_id, created_at from public.admin_users order by user_id')).rows,
+      media: await count(db, 'media_assets'),
+      publicMedia: await count(db, 'media_public_assets'),
+      siteStatus: await readSiteStatus(db),
+      siteStatusOps: await count(db, 'site_status_operations'),
+      clearPriv: (await db.query(`
+        select
+          has_function_privilege('anon', 'public.admin_clear_content_history(uuid, text)', 'execute') as anon_exec,
+          has_function_privilege('authenticated', 'public.admin_clear_content_history(uuid, text)', 'execute') as auth_exec
+      `)).rows[0],
+    };
+    assert.equal(before.history.length, 3);
+
+    const op = randomUUID();
+    const result = await clearContentHistory(db, op);
+    assert.equal(result.operation_id, op);
+    assert.equal(result.deleted_count, 3);
+    assert.equal(result.boundary_version, 3);
+    assert.ok(Number.isSafeInteger(result.boundary_id));
+
+    const after = {
+      site: await state(db),
+      draft: await draftRow(db),
+      history: await historyRows(db),
+      users: await count(db, 'admin_users'),
+      adminRows: (await db.query('select user_id, created_at from public.admin_users order by user_id')).rows,
+      media: await count(db, 'media_assets'),
+      publicMedia: await count(db, 'media_public_assets'),
+      siteStatus: await readSiteStatus(db),
+      siteStatusOps: await count(db, 'site_status_operations'),
+      clearPriv: (await db.query(`
+        select
+          has_function_privilege('anon', 'public.admin_clear_content_history(uuid, text)', 'execute') as anon_exec,
+          has_function_privilege('authenticated', 'public.admin_clear_content_history(uuid, text)', 'execute') as auth_exec
+      `)).rows[0],
+    };
+    assert.deepEqual(after.site, before.site);
+    assert.deepEqual(after.draft, before.draft);
+    assert.deepEqual(after.history, []);
+    assert.equal(after.users, before.users);
+    assert.deepEqual(after.adminRows, before.adminRows);
+    assert.equal(after.media, before.media);
+    assert.equal(after.publicMedia, before.publicMedia);
+    assert.deepEqual(after.siteStatus, before.siteStatus);
+    assert.equal(after.siteStatusOps, before.siteStatusOps);
+    assert.deepEqual(after.clearPriv, before.clearPriv);
+    assert.deepEqual(after.clearPriv, { anon_exec: false, auth_exec: true });
+    assert.equal(approved.id.length > 0, true);
+  });
+
+  test('حذف سجل المحتوى: السجل الفارغ ناجح وإعادة نفس العملية تعيد نفس النتيجة', async (t) => {
+    const db = await createDb();
+    t.after(() => db.close());
+
+    const op = randomUUID();
+    const first = await clearContentHistory(db, op);
+    assert.deepEqual(first, {
+      operation_id: op,
+      deleted_count: 1,
+      boundary_version: 1,
+      boundary_id: first.boundary_id,
+      cleared_at: first.cleared_at,
+    });
+    const replay = await clearContentHistory(db, op);
+    assert.deepEqual(replay, first);
+    assert.equal(await count(db, 'content_history'), 0);
+
+    const afterPublish = await publish(db, 1, null, contentWith('after-clear'), null, randomUUID());
+    assert.equal(afterPublish.version, 2);
+    assert.equal(await count(db, 'content_history'), 1);
+    const replayAfterNewHistory = await clearContentHistory(db, op);
+    assert.deepEqual(replayAfterNewHistory, first);
+    assert.equal(await count(db, 'content_history'), 1);
+  });
+
+  test('حذف سجل المحتوى: إعادة استخدام operation_id بطلب مختلف تُرفض ولا تحذف', async (t) => {
+    const db = await createDb();
+    t.after(() => db.close());
+
+    await publish(db, 1, null, contentWith('v2'), null, randomUUID());
+    const op = randomUUID();
+    const first = await clearContentHistory(db, op);
+    assert.equal(first.deleted_count, 2);
+
+    await publish(db, 2, null, contentWith('v3'), null, randomUUID());
+    assert.equal(await count(db, 'content_history'), 1);
+    await assert.rejects(
+      asAdmin(db, () => db.query(
+        "select public.admin_clear_content_history($1::uuid, $2::text) as result",
+        [op, 'حذف السجل'],
+      )),
+      /confirmation is required/,
+    );
+    // Same operation id, same actor/kind, but different stored request fingerprint
+    // must be rejected by find_operation (PT409) before any delete.
+    const mismatchOp = randomUUID();
+    await db.query(
+      `insert into public.content_operations (operation_id, actor_id, kind, request, result)
+       values ($1::uuid, $2::uuid, 'clear_history', $3::jsonb, $4::jsonb)`,
+      [
+        mismatchOp,
+        ADMIN_ID,
+        JSON.stringify({ confirmation: 'حذف السجل نهائيًا', extra: 'x' }),
+        JSON.stringify({ deleted_count: 0 }),
+      ],
+    );
+    await assert.rejects(
+      asAdmin(db, () => db.query(
+        "select public.admin_clear_content_history($1::uuid, $2::text) as result",
+        [mismatchOp, 'حذف السجل نهائيًا'],
+      )),
+      /operation id was reused with different request parameters/,
+    );
+    // Same operation id belonging to a different kind must be rejected.
+    await assert.rejects(
+      clearContentHistory(db, (await db.query(
+        "select operation_id from public.content_operations where kind = 'publish' limit 1",
+      )).rows[0].operation_id),
+      /operation id belongs to another operation/,
+    );
+    assert.equal(await count(db, 'content_history'), 1);
+  });
+
+  test('حذف سجل المحتوى: الفشل أثناء الحذف لا يترك حذفًا جزئيًا ولا يسجل نجاحًا مضللًا', async (t) => {
+    const db = await createDb();
+    t.after(() => db.close());
+
+    await publish(db, 1, null, contentWith('v2'), null, randomUUID());
+    await publish(db, 2, null, contentWith('v3'), null, randomUUID());
+    const beforeHistory = await historyRows(db);
+    const beforeOps = await count(db, 'content_operations');
+    const op = randomUUID();
+
+    await db.exec(`
+      create function public.test_force_clear_failure() returns trigger
+        language plpgsql
+      as $$
+      begin
+        if old.version = 2 then
+          raise exception 'forced clear failure';
+        end if;
+        return old;
+      end;
+      $$;
+      create trigger test_force_clear_failure
+        before delete on public.content_history
+        for each row
+        execute function public.test_force_clear_failure();
+    `);
+
+    await assert.rejects(
+      clearContentHistory(db, op),
+      /forced clear failure/,
+    );
+
+    assert.deepEqual(await historyRows(db), beforeHistory);
+    assert.equal(await count(db, 'content_operations'), beforeOps);
+    assert.deepEqual((await db.query(
+      'select operation_id, kind from public.content_operations where operation_id = $1::uuid',
+      [op],
+    )).rows, []);
+
+    await db.exec(`
+      drop trigger test_force_clear_failure on public.content_history;
+      drop function public.test_force_clear_failure();
+    `);
+
+    const ok = await clearContentHistory(db, op);
+    assert.equal(ok.deleted_count, 3);
+    assert.deepEqual(await historyRows(db), []);
+  });
+
+  test('حالة الموقع: التكرار الآمن والتعارض صريحان والرسالة محدودة', async (t) => {
+    const db = await createDb();
+    t.after(() => db.close());
+
+    const operationId = randomUUID();
+    const first = await setSiteStatus(db, 'stopped', 'صيانة', 1, operationId);
+    const replay = await setSiteStatus(db, 'stopped', 'صيانة', 1, operationId);
+    assert.equal(first.idempotent, false);
+    assert.equal(replay.idempotent, true);
+    assert.equal(replay.revision, first.revision);
+    assert.equal(replay.updated_at, first.updated_at);
+    assert.equal(await count(db, 'site_status_operations'), 1);
+
+    await assert.rejects(
+      setSiteStatus(db, 'stopped', 'رسالة مختلفة', 1, operationId),
+      (error) => error.code === 'PT409' && /operation id was reused/.test(error.message),
+    );
+    await assert.rejects(
+      setSiteStatus(db, 'running', '', 1, randomUUID()),
+      (error) => error.code === 'PT409' && /stale site status revision/.test(error.message),
+    );
+    await assert.rejects(
+      setSiteStatus(db, 'running', 'يجب ألا تظهر', 2, randomUUID()),
+      /restart must clear the visitor message/,
+    );
+    await assert.rejects(
+      setSiteStatus(db, 'stopped', 'x'.repeat(301), 2, randomUUID()),
+      /site message is too long/,
+    );
+
+    const restarted = await setSiteStatus(db, 'running', '', 2, randomUUID());
+    assert.equal(restarted.state, 'running');
+    assert.equal(restarted.message, '');
+    assert.equal(restarted.revision, 3);
+    assert.equal((await siteStatusRow(db)).updated_by, ADMIN_ID);
+    assert.equal(await count(db, 'site_status_operations'), 2);
+
+    const staleReplay = await setSiteStatus(db, 'stopped', 'صيانة', 1, operationId);
+    assert.equal(staleReplay.idempotent, true);
+    assert.equal(staleReplay.revision, first.revision);
+    const afterReplay = await readSiteStatus(db);
+    assert.equal(afterReplay.state, 'running');
+    assert.equal(afterReplay.revision, restarted.revision);
+    assert.equal(await count(db, 'site_status_operations'), 2);
   });
 }

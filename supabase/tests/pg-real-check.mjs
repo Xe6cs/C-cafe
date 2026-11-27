@@ -37,6 +37,8 @@ const MIGRATIONS = [
   'supabase/migrations/20261114090000_analytics.sql',
   'supabase/migrations/20261115090000_analytics_digest_guard.sql',
   'supabase/migrations/20261116090000_analytics_day_cap.sql',
+  'supabase/migrations/20261126120000_site_status.sql',
+  'supabase/migrations/20261127120000_content_history_clear.sql',
 ];
 
 const ADMIN_ID = '11111111-1111-1111-1111-111111111111';
@@ -90,9 +92,14 @@ const PUBLISH_SQL =
   'select public.admin_publish($1::bigint, $2::uuid, $3::jsonb, $4::text, $5::uuid) as result';
 const RESTORE_SQL =
   'select public.admin_restore($1::bigint, $2::bigint, $3::text, $4::uuid) as result';
+const CLEAR_HISTORY_SQL =
+  'select public.admin_clear_content_history($1::uuid, $2::text) as result';
 const BEGIN_CHECK_SQL = 'select public.admin_begin_public_check($1::bigint) as result';
 const FINISH_CHECK_SQL =
   'select public.admin_finish_public_check($1::bigint, $2::text, $3::bigint, $4::text) as result';
+const SITE_STATUS_SQL = 'select public.admin_site_status() as result';
+const SET_SITE_STATUS_SQL =
+  'select public.admin_set_site_status($1::text, $2::text, $3::bigint, $4::uuid) as result';
 const INGEST_SQL = 'select public.analytics_ingest($1::text, $2::text, $3::jsonb, $4::text) as result';
 
 // The migration ships the production digest; the harness replaces it with a
@@ -153,6 +160,12 @@ async function draftRow(client) {
       'select revision_id, content, base_version from public.draft where id = 1',
     )
   ).rows[0] || null;
+}
+
+async function historyRows(client) {
+  return (await client.query(
+    'select id, version, content, note from public.content_history order by version desc, id desc',
+  )).rows;
 }
 
 async function waitFor(predicate, label, timeoutMs = 15000) {
@@ -292,6 +305,21 @@ if (unavailable) {
     );
     assert.equal(view.rows[0].relkind, 'v', 'published_content must stay a view, not a table');
 
+    const statusColumns = await ctx.db.query(`
+      select column_name
+      from information_schema.columns
+      where table_schema = 'public' and table_name = 'public_site_status'
+      order by ordinal_position
+    `);
+    assert.deepEqual(
+      statusColumns.rows.map((row) => row.column_name),
+      ['state', 'message'],
+    );
+    const statusView = await ctx.db.query(
+      "select relkind from pg_class where oid = 'public.public_site_status'::regclass",
+    );
+    assert.equal(statusView.rows[0].relkind, 'v', 'public_site_status must stay a view');
+
     const grants = await ctx.db.query(`
       select
         has_table_privilege('anon', 'public.published_content', 'select') as anon_view_select,
@@ -305,7 +333,20 @@ if (unavailable) {
         has_function_privilege('authenticated', 'public.is_admin()', 'execute') as auth_is_admin,
         has_function_privilege('authenticated', 'public.validate_content(jsonb)', 'execute') as auth_validate,
         has_function_privilege('authenticated', 'public.find_operation(uuid, uuid, text, jsonb)', 'execute') as auth_find,
-        has_function_privilege('authenticated', 'public.assert_admin()', 'execute') as auth_assert_admin
+        has_function_privilege('authenticated', 'public.assert_admin()', 'execute') as auth_assert_admin,
+        has_table_privilege('anon', 'public.public_site_status', 'select') as anon_status_view_select,
+        has_table_privilege('anon', 'public.public_site_status', 'insert') as anon_status_view_insert,
+        has_table_privilege('anon', 'public.public_site_status', 'update') as anon_status_view_update,
+        has_table_privilege('anon', 'public.public_site_status', 'delete') as anon_status_view_delete,
+        has_table_privilege('anon', 'public.site_status', 'select') as anon_status_base_select,
+        has_table_privilege('authenticated', 'public.site_status', 'select') as auth_status_base_select,
+        has_table_privilege('anon', 'public.site_status_operations', 'select') as anon_status_ops_select,
+        has_table_privilege('authenticated', 'public.site_status_operations', 'select') as auth_status_ops_select,
+        has_function_privilege('anon', 'public.admin_site_status()', 'execute') as anon_status_read,
+        has_function_privilege('authenticated', 'public.admin_site_status()', 'execute') as auth_status_read,
+        has_function_privilege('anon', 'public.admin_set_site_status(text, text, bigint, uuid)', 'execute') as anon_status_write,
+        has_function_privilege('authenticated', 'public.admin_set_site_status(text, text, bigint, uuid)', 'execute') as auth_status_write,
+        has_function_privilege('authenticated', 'public.find_site_status_operation(uuid, uuid, text, jsonb)', 'execute') as auth_find_status_op
     `);
     const g = grants.rows[0];
     assert.equal(g.anon_view_select, true);
@@ -320,6 +361,19 @@ if (unavailable) {
     assert.equal(g.auth_validate, false);
     assert.equal(g.auth_find, false);
     assert.equal(g.auth_assert_admin, false);
+    assert.equal(g.anon_status_view_select, true);
+    assert.equal(g.anon_status_view_insert, false);
+    assert.equal(g.anon_status_view_update, false);
+    assert.equal(g.anon_status_view_delete, false);
+    assert.equal(g.anon_status_base_select, false);
+    assert.equal(g.auth_status_base_select, true);
+    assert.equal(g.anon_status_ops_select, false);
+    assert.equal(g.auth_status_ops_select, true);
+    assert.equal(g.anon_status_read, false);
+    assert.equal(g.auth_status_read, true);
+    assert.equal(g.anon_status_write, false);
+    assert.equal(g.auth_status_write, true);
+    assert.equal(g.auth_find_status_op, false);
 
     const definerFunctions = await ctx.db.query(`
       select p.oid::regprocedure::text as signature, p.prosecdef, p.proconfig
@@ -349,9 +403,16 @@ if (unavailable) {
       assert.deepEqual(Object.keys(publicRows.rows[0]).sort(), ['content', 'saved_at', 'version']);
       assert.deepEqual(publicRows.rows[0].content, defaultContent);
 
+      const publicStatus = await anon.query('select * from public.public_site_status');
+      assert.equal(publicStatus.rows.length, 1);
+      assert.deepEqual(publicStatus.rows[0], { state: 'running', message: '' });
+      await assert.rejects(anon.query(SITE_STATUS_SQL), /permission denied/);
+      await assert.rejects(anon.query(SET_SITE_STATUS_SQL, ['stopped', '', 1, ADMIN_ID]), /permission denied/);
+
       for (const table of [
         'site_content', 'draft', 'content_history', 'admin_users',
-        'content_operations', 'verification_checks',
+        'content_operations', 'verification_checks', 'site_status',
+        'site_status_operations',
       ]) {
         await assert.rejects(
           anon.query(`select * from public.${table}`),
@@ -372,7 +433,8 @@ if (unavailable) {
 
       for (const table of [
         'site_content', 'draft', 'content_history',
-        'content_operations', 'verification_checks',
+        'content_operations', 'verification_checks', 'site_status',
+        'site_status_operations',
       ]) {
         const rows = await user.query(`select * from public.${table}`);
         assert.equal(rows.rows.length, 0, `non-admin must see no ${table} rows`);
@@ -380,6 +442,12 @@ if (unavailable) {
       const ownAdminRows = await user.query('select * from public.admin_users');
       assert.equal(ownAdminRows.rows.length, 0);
       assert.equal((await user.query('select public.is_admin() as result')).rows[0].result, false);
+
+      await assert.rejects(user.query(SITE_STATUS_SQL), /admin only/);
+      await assert.rejects(
+        user.query(SET_SITE_STATUS_SQL, ['stopped', '', 1, randomUUID()]),
+        /admin only/,
+      );
 
       await assert.rejects(
         user.query('select public.admin_save_draft(1, null, $1::jsonb)', [
@@ -406,6 +474,9 @@ if (unavailable) {
       );
 
       assert.equal((await admin.query('select public.is_admin() as result')).rows[0].result, true);
+      const adminStatus = await call(admin, SITE_STATUS_SQL);
+      assert.equal(adminStatus.state, 'running');
+      assert.equal(adminStatus.revision, 1);
       assert.equal((await admin.query('select * from public.site_content')).rows.length, 1);
       assert.equal((await admin.query('select * from public.admin_users')).rows.length, 1);
 
@@ -956,6 +1027,142 @@ if (unavailable) {
         [visitor],
       );
       assert.equal(afterRejects.rows[0].count, 121);
+    } finally {
+      await a.end();
+      await b.end();
+    }
+  });
+
+  test('حالة الموقع: طلبا إيقاف متزامنان لا يقبلان المراجعة نفسها والتكرار الآمن واحد', async (t) => {
+    const ctx = await createTestDb(t);
+    const a = await session(ctx.name, 'authenticated', ADMIN_ID);
+    const b = await session(ctx.name, 'authenticated', ADMIN_ID);
+    const operationA = randomUUID();
+    const operationB = randomUUID();
+
+    try {
+      await a.query('begin');
+      const first = await call(a, SET_SITE_STATUS_SQL, ['stopped', 'صيانة', 1, operationA]);
+      assert.equal(first.revision, 2);
+      await waitForAdvisoryLock(ctx.db, a.processID);
+
+      await b.query('begin');
+      const secondPromise = call(b, SET_SITE_STATUS_SQL, ['stopped', 'رسالة أخرى', 1, operationB]);
+      await waitForBlocked(ctx.db, b.processID, a.processID);
+
+      await a.query('commit');
+
+      let secondError = null;
+      try {
+        await secondPromise;
+      } catch (error) {
+        secondError = error;
+      }
+      await b.query('rollback');
+
+      assert.ok(secondError, 'the second stop must fail');
+      assert.equal(secondError.code, 'PT409');
+      assert.match(secondError.message, /stale site status revision/);
+
+      const after = await call(a, SITE_STATUS_SQL);
+      assert.equal(after.state, 'stopped');
+      assert.equal(after.message, 'صيانة');
+      assert.equal(after.revision, 2);
+      assert.equal(after.changed_by.id, ADMIN_ID);
+      assert.equal(await count(ctx.db, 'site_status_operations'), 1);
+
+      const publicStatus = await ctx.db.query('select * from public.public_site_status');
+      assert.deepEqual(publicStatus.rows[0], { state: 'stopped', message: 'صيانة' });
+
+      const replay = await call(b, SET_SITE_STATUS_SQL, ['stopped', 'صيانة', 1, operationA]);
+      assert.equal(replay.idempotent, true);
+      assert.equal(replay.revision, first.revision);
+      assert.equal(replay.updated_at, first.updated_at);
+      assert.equal(await count(ctx.db, 'site_status_operations'), 1);
+
+      const restarted = await call(a, SET_SITE_STATUS_SQL, ['running', '', 2, randomUUID()]);
+      assert.equal(restarted.state, 'running');
+      assert.equal(restarted.revision, 3);
+      assert.equal((await state(ctx.db)).version, 1);
+
+      // A replay of the old stop request is harmless after a newer restart:
+      // it returns the stored result without rolling the newer state back.
+      const beforeStaleReplay = await count(ctx.db, 'site_status_operations');
+      const staleReplay = await call(a, SET_SITE_STATUS_SQL, ['stopped', 'صيانة', 1, operationA]);
+      assert.equal(staleReplay.idempotent, true);
+      assert.equal(staleReplay.revision, first.revision);
+      const afterReplay = await call(a, SITE_STATUS_SQL);
+      assert.equal(afterReplay.state, 'running');
+      assert.equal(afterReplay.revision, restarted.revision);
+      const publicAfterReplay = await ctx.db.query('select * from public.public_site_status');
+      assert.deepEqual(publicAfterReplay.rows[0], { state: 'running', message: '' });
+      assert.equal(await count(ctx.db, 'site_status_operations'), beforeStaleReplay);
+    } finally {
+      await a.end();
+      await b.end();
+    }
+  });
+
+  test('حذف سجل المحتوى مع نشر متزامن: لا فقد جزئي ولا حذف لنسخ بعد الحد', async (t) => {
+    const ctx = await createTestDb(t);
+    const a = await session(ctx.name, 'authenticated', ADMIN_ID);
+    const b = await session(ctx.name, 'authenticated', ADMIN_ID);
+    const clearOp = randomUUID();
+    const publishOp = randomUUID();
+
+    try {
+      await call(a, PUBLISH_SQL, [1, null, JSON.stringify(contentWith('v2')), null, randomUUID()]);
+
+      await a.query('begin');
+      const clearResult = await call(a, CLEAR_HISTORY_SQL, [clearOp, 'حذف السجل نهائيًا']);
+      assert.equal(clearResult.deleted_count, 2);
+      await waitForAdvisoryLock(ctx.db, a.processID);
+
+      await b.query('begin');
+      const publishPromise = call(b, PUBLISH_SQL, [2, null, JSON.stringify(contentWith('v3')), null, publishOp]);
+      await waitForBlocked(ctx.db, b.processID, a.processID);
+
+      await a.query('commit');
+      const publishResult = await publishPromise;
+      await b.query('commit');
+
+      assert.equal(publishResult.version, 3);
+      const history = await historyRows(ctx.db);
+      assert.equal(history.length, 1);
+      assert.equal(history[0].version, 3);
+      assert.equal((await state(ctx.db)).version, 3);
+    } finally {
+      await a.end();
+      await b.end();
+    }
+  });
+
+  test('حذف سجل المحتوى مع استعادة متزامنة لنسخة محذوفة: الاستعادة تفشل دون حذف جزئي', async (t) => {
+    const ctx = await createTestDb(t);
+    const a = await session(ctx.name, 'authenticated', ADMIN_ID);
+    const b = await session(ctx.name, 'authenticated', ADMIN_ID);
+
+    try {
+      await call(a, PUBLISH_SQL, [1, null, JSON.stringify(contentWith('v2')), null, randomUUID()]);
+      const oldHistory = await historyRows(ctx.db);
+      const target = oldHistory.find((row) => row.version === 1);
+      assert.ok(target);
+
+      await a.query('begin');
+      const clearResult = await call(a, CLEAR_HISTORY_SQL, [randomUUID(), 'حذف السجل نهائيًا']);
+      assert.equal(clearResult.deleted_count, 2);
+      await waitForAdvisoryLock(ctx.db, a.processID);
+
+      await b.query('begin');
+      const restorePromise = call(b, RESTORE_SQL, [target.id, 2, 'restore-old', randomUUID()]);
+      await waitForBlocked(ctx.db, b.processID, a.processID);
+
+      await a.query('commit');
+      await assert.rejects(restorePromise, /history version not found/);
+      await b.query('rollback');
+
+      assert.equal(await count(ctx.db, 'content_history'), 0);
+      assert.equal((await state(ctx.db)).version, 2);
     } finally {
       await a.end();
       await b.end();

@@ -107,8 +107,14 @@
 .history-head {
   display: flex;
   flex-wrap: wrap;
-  align-items: baseline;
+  align-items: flex-start;
   justify-content: space-between;
+  gap: 8px 12px;
+}
+.history-head-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
   gap: 6px 12px;
 }
 .history-count { color: var(--text-3); font-size: 0.8rem; }

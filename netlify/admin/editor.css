@@ -142,7 +142,27 @@
 .media-confirm .media-thumb { width: 96px; }
 .media-confirm-info { display: grid; gap: 8px; min-width: 0; }
 
+/* حالة الموقع */
+.site-state-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.site-state-row .badge { font-size: 0.9rem; padding: 3px 12px; }
+.site-message {
+  margin: 0;
+  padding: 12px 14px;
+  border-inline-start: 3px solid var(--orange);
+  border-radius: 8px;
+  background: rgba(250, 106, 4, 0.08);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.8;
+}
+.site-status-actions { display: grid; gap: 10px; }
+.site-status-actions .actions-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.site-status-retry { align-items: center; justify-content: flex-start; margin-top: 4px; }
+.site-status-retry .group-hint { margin: 0; }
+
 @media (max-width: 860px) {
+  .site-status-actions .actions-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .site-status-actions .actions-row .btn { width: 100%; }
   #status-banner .status-banner { margin: 12px 14px 0; }
   .status-banner { margin: 12px 14px 0; }
   .preview-frame { height: 64vh; min-height: 380px; }

@@ -6,6 +6,7 @@
 //   PREVIEW_URL=https://... EXPECT_PREVIEW=1 npm run check:preview
 //
 // It checks:
+//   * an explicit 503 pause page is reported as site state, not as content;
 //   * the page is served and marked live or fallback;
 //   * the live version meta matches the response header;
 //   * preview/fallback responses are noindex and production live is not;
@@ -51,12 +52,28 @@ function assert(condition, message) {
 }
 
 const pageResponse = await fetch(`${base}/`);
-assert(pageResponse.status === 200, `page status ${pageResponse.status}`);
 const html = await pageResponse.text();
+const stateHeader = pageResponse.headers.get('x-ccafe-site-state');
+const stateMetaMatch = html.match(/<meta name="ccafe-site-state" content="([^"]+)">/);
+const siteState = (stateHeader || stateMetaMatch?.[1] || '').toLowerCase();
 const source = pageResponse.headers.get('x-ccafe-source');
 const headerVersion = pageResponse.headers.get('x-ccafe-version');
 const reason = pageResponse.headers.get('x-ccafe-reason');
 
+if (pageResponse.status === 503 && (siteState === 'stopped' || siteState === 'unknown')) {
+  console.log(`SITE PAUSED: state=${siteState} source=${source || 'unavailable'} reason=${reason || 'site_stopped'}`);
+  assert(!/<meta name="ccafe-content-version"/.test(html), 'pause page must not contain a content-version marker');
+  assert(!/track\.js/.test(html), 'pause page must not reference track.js');
+  console.log(JSON.stringify({
+    total: 1,
+    failed: 1,
+    siteState,
+    skipped: 'published-content checks are not valid while the site is paused',
+  }));
+  process.exit(1);
+}
+
+assert(pageResponse.status === 200, `page status ${pageResponse.status}`);
 console.log(`source=${source}${headerVersion ? ` version=${headerVersion}` : ''}${reason ? ` reason=${reason}` : ''}`);
 
 await check('page is served with the expected source', () => {

@@ -17,6 +17,7 @@
   const API = '/api/admin';
   const MAX_NOTE = 500;
   const MAX_OPERATION_NOTE = 200;
+  const MAX_SITE_MESSAGE = 300;
   const TOAST_MS = 5000;
   const AUTOSAVE_MS = 1200;
   const MEDIA_TARGET_BYTES = 4 * 1024 * 1024;
@@ -25,7 +26,7 @@
   const MEDIA_REF_RE = /^media\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
   const EDITOR_VIEWS = new Set(['editor', 'texts', 'links', 'sections']);
-  const VIEWS = new Set([...EDITOR_VIEWS, 'preview', 'published', 'history', 'media', 'stats']);
+  const VIEWS = new Set([...EDITOR_VIEWS, 'preview', 'published', 'history', 'media', 'stats', 'site-status']);
 
   const TITLES = {
     editor: 'كل المحتوى',
@@ -37,6 +38,7 @@
     history: 'سجل النسخ',
     media: 'مكتبة الوسائط',
     stats: 'نشاط الزوار',
+    'site-status': 'حالة الموقع',
   };
 
   const state = {
@@ -64,6 +66,24 @@
     previewStale: true,
     publish: { busy: false, pending: null },
     restore: { busy: false, pending: null },
+    historyClear: { busy: false, pending: null, confirming: false },
+    siteStatus: {
+      // `value` comes only from GET /api/admin/site-status. A write result is
+      // historical confirmation; it is never treated as the current state.
+      value: null,
+      loaded: false,
+      loading: false,
+      loadSeq: 0,
+      loadInflight: 0,
+      error: '',
+      busy: false,
+      dialogBusy: false,
+      currentUnconfirmed: false,
+      notice: '',
+      noticeKind: '',
+      pending: null,
+      confirmed: null,
+    },
     media: {
       loaded: false,
       loadedAt: 0,
@@ -224,6 +244,7 @@
       (actions || []).map((action) => el('button', {
         class: action.class || 'btn btn-ghost',
         type: 'button',
+        disabled: action.disabled === true,
         onClick() {
           if (typeof action.onClick === 'function') action.onClick(close);
           else close();
@@ -341,13 +362,16 @@
   }
 
   // إعادة استخدام المعرّف لنفس الطلب فقط. إن تغيّرت النسخة أو المراجعة أو
-  // الملاحظة، فهذا طلب مختلف ويأخذ معرّفًا جديدًا.
-  function operationIdFor(bucket, signature) {
+  // الملاحظة، فهذا طلب مختلف ويأخذ معرّفًا جديدًا. makePending يسمح لحالة
+  // الموقع بتخزين الطلب كاملًا بدل بصمة المعرّف وحدها.
+  function operationIdFor(bucket, signature, makePending) {
     if (bucket.pending && bucket.pending.signature === signature) {
-      return bucket.pending.operationId;
+      return bucket.pending.operation_id || bucket.pending.operationId;
     }
     const operationId = newOperationId();
-    bucket.pending = { operationId, signature };
+    bucket.pending = typeof makePending === 'function'
+      ? makePending(operationId, signature)
+      : { operationId, signature };
     return operationId;
   }
 
@@ -410,6 +434,22 @@
     state.previewStale = true;
     state.publish = { busy: false, pending: null };
     state.restore = { busy: false, pending: null };
+    state.historyClear = { busy: false, pending: null, confirming: false };
+    state.siteStatus = {
+      value: null,
+      loaded: false,
+      loading: false,
+      loadSeq: 0,
+      loadInflight: 0,
+      error: '',
+      busy: false,
+      dialogBusy: false,
+      currentUnconfirmed: false,
+      notice: '',
+      noticeKind: '',
+      pending: null,
+      confirmed: null,
+    };
     state.media = {
       loaded: false,
       loadedAt: 0,
@@ -1489,6 +1529,7 @@
       state.token = session.access_token;
       els['login-password'].value = '';
       await loadDashboard(true);
+      await loadSiteStatus(true);
     } catch (error) {
       if (error && error.status === 401) {
         await endSession('انتهت الجلسة أو أصبحت غير صالحة. سجّل الدخول مرة أخرى.');
@@ -1852,8 +1893,8 @@
 
   function operationBlocked() {
     if (!state.user) return true;
-    if (state.publish.busy || state.restore.busy) {
-      toast('عملية نشر أو استعادة قيد التنفيذ. انتظر اكتمالها.', 'error');
+    if (state.publish.busy || state.restore.busy || state.historyClear.busy || state.siteStatus.busy) {
+      toast('عملية نشر أو استعادة أو حذف للسجل أو تغيير لحالة الموقع قيد التنفيذ. انتظر اكتمالها.', 'error');
       return true;
     }
     if (state.saving || state.pending) {
@@ -2073,6 +2114,185 @@
     }
   }
 
+  function clearHistoryDialog() {
+    const CONFIRMATION = 'حذف السجل نهائيًا';
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (value) => {
+        if (settled) return;
+        settled = true;
+        resolve(value);
+      };
+      const input = el('input', {
+        class: 'input',
+        type: 'text',
+        autocomplete: 'off',
+        dir: 'auto',
+        placeholder: CONFIRMATION,
+        'aria-label': 'اكتب عبارة التأكيد',
+      });
+      const warning = el('p', { class: 'field-warn', hidden: true });
+      let confirmButton = null;
+      const sync = () => {
+        const matches = input.value.trim() === CONFIRMATION;
+        if (confirmButton) confirmButton.disabled = !matches;
+        warning.hidden = matches || input.value.trim() === '';
+        warning.textContent = matches ? '' : `اكتب العبارة التالية كما هي: ${CONFIRMATION}`;
+      };
+      input.addEventListener('input', sync);
+
+      const body = [
+        el('p', { class: 'dialog-text' },
+          'سيُحذف جميع نسخ سجل المحتوى الموجودة الآن فقط. لن يتغير المحتوى المنشور الحالي أو رقمه، ولن تتأثر المسودة أو مكتبة الوسائط أو المستخدمون أو حالة الموقع وسجل عملياتها أو التحليلات.'),
+        el('p', { class: 'dialog-text' },
+          'بعد الحذف لن تكون الاستعادة من اللوحة ممكنة للنسخ المحذوفة. هذا الإجراء لا يزيل النسخ الاحتياطية السابقة خارج هذه اللوحة.'),
+        el('label', { class: 'field' },
+          el('span', { class: 'field-label', text: `اكتب «${CONFIRMATION}» للتأكيد` }),
+          input),
+        warning,
+      ];
+
+      openModal({
+        title: 'حذف سجل التعديلات نهائيًا',
+        body,
+        actions: [
+          {
+            label: 'إلغاء',
+            class: 'btn btn-ghost',
+            onClick(close) { done(false); close(); },
+          },
+          {
+            label: 'حذف السجل نهائيًا',
+            class: 'btn btn-danger',
+            disabled: true,
+            onClick(close) {
+              if (input.value.trim() !== CONFIRMATION) {
+                sync();
+                return;
+              }
+              done(true);
+              close();
+            },
+          },
+        ],
+        onClose() { done(false); },
+      });
+      const dialogs = document.body.querySelectorAll('dialog');
+      const dialog = dialogs[dialogs.length - 1];
+      confirmButton = dialog
+        ? Array.from(dialog.querySelectorAll('button')).find((node) => node.textContent.includes('حذف السجل نهائيًا')) || null
+        : null;
+      sync();
+    });
+  }
+
+  async function refreshHistoryOnly() {
+    const history = await apiGet(`${API}/history`);
+    const entries = normalizeHistory(history.entries);
+    state.history = entries;
+    state.historySummary = {
+      count: entries.length,
+      latest: entries.length ? entries[0] : null,
+    };
+    state.loadedAt = new Date();
+  }
+
+  async function onClearHistory() {
+    if (state.historyClear.confirming || state.historyClear.busy) return;
+    if (operationBlocked()) return;
+    state.historyClear.confirming = true;
+    let confirmed = false;
+    try {
+      confirmed = await clearHistoryDialog();
+    } finally {
+      // Keep confirming true while the confirmed request is being sent; it is
+      // released in the request finally block. If cancelled, release now.
+      if (!confirmed) state.historyClear.confirming = false;
+    }
+    if (!confirmed) return;
+
+    state.historyClear.busy = true;
+    updateStatus();
+    if (state.view === 'history') renderHistory();
+
+    let operationId;
+    try {
+      operationId = operationIdFor(
+        state.historyClear,
+        'clear-history:حذف السجل نهائيًا',
+      );
+    } catch {
+      state.historyClear.busy = false;
+      state.historyClear.confirming = false;
+      updateStatus();
+      if (state.view === 'history') renderHistory();
+      toast('تعذّر توليد معرّف العملية في هذا المتصفح.', 'error');
+      return;
+    }
+
+    try {
+      const result = await apiSend(`${API}/history/clear`, {
+        operation_id: operationId,
+        confirmation: 'حذف السجل نهائيًا',
+      });
+      if (!isPlainObject(result)
+        || result.operation_id !== operationId
+        || !Number.isSafeInteger(result.deleted_count)
+        || result.deleted_count < 0) {
+        const error = new Error('invalid-response');
+        error.status = 502;
+        throw error;
+      }
+
+      state.historyClear.pending = null;
+      let refreshed = true;
+      try {
+        await refreshHistoryOnly();
+      } catch (error) {
+        refreshed = false;
+        if (error && error.status === 401) {
+          await endSession('انتهت الجلسة. سجّل الدخول مجددًا.');
+          return;
+        }
+        if (error && error.status === 403) {
+          await endSession('هذا الحساب لا يملك صلاحية المدير.');
+          return;
+        }
+        toast(
+          `تم حذف سجل التعديلات نهائيًا. عدد النسخ المحذوفة: ${result.deleted_count}. لكن تعذّر تحديث قائمة السجل؛ أعد التحديث.`,
+          'error',
+        );
+      }
+      if (refreshed) {
+        toast(`تم حذف سجل التعديلات نهائيًا. عدد النسخ المحذوفة: ${result.deleted_count}.`, 'success');
+      }
+    } catch (error) {
+      if (error && error.status === 401) {
+        state.historyClear.pending = null;
+        await endSession('انتهت الجلسة. سجّل الدخول مجددًا.');
+      } else if (error && error.status === 403) {
+        state.historyClear.pending = null;
+        toast('هذا الحساب لا يملك صلاحية حذف السجل.', 'error');
+      } else if (error && error.status === 409) {
+        state.historyClear.pending = null;
+        toast('تعارض في عملية حذف السجل. أعد تحميل السجل ثم حاول مجددًا.', 'error');
+      } else if (error && error.status === 422 || (error && error.status === 400)) {
+        state.historyClear.pending = null;
+        toast('رفض الخادم طلب حذف السجل. تحقق من التأكيد ثم أعد المحاولة.', 'error');
+      } else {
+        // Keep the same operation id: the clear may have committed before the
+        // response was lost. Retrying the same request replays the original
+        // result and must not delete newer history rows.
+        toast('تعذّر تأكيد حذف السجل بسبب انقطاع الرد. أعد المحاولة من نفس الزر؛ لن تُحذف نسخ أحدث بإعادة الطلب نفسه.', 'error');
+      }
+    } finally {
+      state.historyClear.busy = false;
+      state.historyClear.confirming = false;
+      updateStatus();
+      if (state.view === 'history') renderHistory();
+    }
+  }
+
   async function runVerification(version) {
     if (!Number.isSafeInteger(version) || version < 1) return;
     const seq = state.verify.seq + 1;
@@ -2155,6 +2375,7 @@
     els.refresh.textContent = 'جارٍ التحديث…';
     try {
       await loadDashboard(true);
+      await loadSiteStatus(true);
       if (state.view === 'preview') await loadPreview();
       toast('تم تحديث البيانات.', 'success');
     } catch (error) {
@@ -2203,6 +2424,462 @@
     }
   }
 
+  function normalizeSiteStatus(value) {
+    if (!isPlainObject(value)) return null;
+    if (value.state !== 'running' && value.state !== 'stopped') return null;
+    if (typeof value.message !== 'string'
+      || [...value.message].length > MAX_SITE_MESSAGE) return null;
+    if (!Number.isSafeInteger(value.revision) || value.revision < 1) return null;
+    if (typeof value.updated_at !== 'string') return null;
+    if (!isPlainObject(value.changed_by)) return null;
+    if (value.changed_by.id !== null && typeof value.changed_by.id !== 'string') return null;
+    if (typeof value.changed_by.email !== 'string') return null;
+    return {
+      state: value.state,
+      message: value.message,
+      revision: value.revision,
+      updated_at: value.updated_at,
+      changed_by: {
+        id: value.changed_by.id,
+        email: value.changed_by.email,
+      },
+    };
+  }
+
+  function normalizeSiteStatusWrite(value, operationId) {
+    const status = normalizeSiteStatus(value);
+    if (!status) return null;
+    if (!isPlainObject(value) || value.operation_id !== operationId
+      || typeof value.idempotent !== 'boolean') return null;
+    return { ...status, idempotent: value.idempotent };
+  }
+
+  function siteStateLabel(stateValue) {
+    return stateValue === 'stopped' ? 'متوقف مؤقتًا' : 'يعمل';
+  }
+
+  function siteStatusUnconfirmedNotice(result) {
+    const prefix = result && result.idempotent
+      ? 'العملية المطلوبة كانت مؤكدة سابقًا بنتيجة تاريخية، '
+      : 'تم تأكيد العملية على الخادم، ';
+    return `${prefix}لكن تعذّر جلب الحالة الحالية. الحالة الحالية غير مؤكدة؛ لا تفترض أن الموقع متوقف أو يعمل. استخدم «إعادة محاولة الطلب نفسه» لمراجعة العملية ذاتها.`;
+  }
+
+  // الرد المفقود لا يعني أن العملية فشلت ولا أنها نجحت؛ نتيجة GET القديمة
+  // لا تصلح وصفًا للحالة الحالية بعد إرسال الطلب.
+  function siteStatusAmbiguousNotice() {
+    return 'انقطع الرد قبل تأكيد تغيير الحالة، فلا يمكن الجزم بما إذا نُفّذ الطلب. الحالة الحالية غير مؤكدة؛ لا تفترض أن الموقع متوقف أو يعمل. استخدم «إعادة محاولة الطلب نفسه» لمراجعة العملية ذاتها.';
+  }
+
+  function siteStatusCurrentNotice(request, result, current) {
+    const historical = result.idempotent
+      ? `العملية المطلوبة كانت مؤكدة سابقًا بنتيجة تاريخية (${siteStateLabel(result.state)})، ولم تُنشأ عملية جديدة. `
+      : 'تم تأكيد العملية على الخادم. ';
+    const currentText = `الحالة الحالية الآن ${siteStateLabel(current.state)} (المراجعة #${current.revision}) حسب قراءة جديدة من الخادم.`;
+    if (current.state === request.state) return `${historical}${currentText}`;
+    return `${historical}${currentText} لم تُعرض النتيجة التاريخية كحالة حالية؛ يبدو أن جلسة أخرى غيّرت الحالة بعدها.`;
+  }
+
+  // كل قراءة تأخذ رقمًا متسلسلًا. الاستجابة القديمة تُتجاهل، ولا تُكتب أبدًا
+  // فوق مراجعة أحدث ظهرت في الواجهة حتى لو وصلت بعدها.
+  async function loadSiteStatus(force, options = {}) {
+    if (!state.user) return { ok: false, applied: false };
+    if (!force && state.siteStatus.loaded && state.siteStatus.loadInflight === 0) {
+      return { ok: true, applied: true, value: state.siteStatus.value };
+    }
+
+    const seq = ++state.siteStatus.loadSeq;
+    state.siteStatus.loadInflight += 1;
+    state.siteStatus.loading = true;
+    if (!options.quiet) state.siteStatus.error = '';
+    if (state.user && state.view === 'site-status') renderSiteStatusView();
+
+    let authError = '';
+    let result = { ok: false, applied: false, stale: false };
+    try {
+      const data = await apiGet(`${API}/site-status`);
+      const value = normalizeSiteStatus(data);
+      if (!value) {
+        const error = new Error('invalid-response');
+        error.status = 502;
+        throw error;
+      }
+      if (seq !== state.siteStatus.loadSeq) {
+        result.stale = true;
+      } else {
+        const current = state.siteStatus.value;
+        const applied = !current || value.revision >= current.revision;
+        if (applied) {
+          state.siteStatus.value = value;
+          state.siteStatus.loaded = true;
+          state.siteStatus.currentUnconfirmed = false;
+        }
+        result = { ok: true, applied, value, stale: false };
+      }
+    } catch (error) {
+      if (seq !== state.siteStatus.loadSeq) {
+        result.stale = true;
+      } else if (error && error.status === 401) {
+        authError = 'انتهت الجلسة أو أصبحت غير صالحة. سجّل الدخول مرة أخرى.';
+      } else if (error && error.status === 403) {
+        authError = 'هذا الحساب لا يملك صلاحية المدير.';
+      } else if (!options.quiet) {
+        state.siteStatus.error = 'تعذّر تحميل حالة الموقع. تحقق من الاتصال ثم أعد المحاولة.';
+      }
+    } finally {
+      state.siteStatus.loadInflight = Math.max(0, state.siteStatus.loadInflight - 1);
+      state.siteStatus.loading = state.siteStatus.loadInflight > 0;
+      if (state.user && state.view === 'site-status') renderSiteStatusView();
+    }
+    if (authError) await endSession(authError);
+    return result;
+  }
+
+  function siteStatusNotice() {
+    const item = state.siteStatus;
+    if (item.loading) {
+      return el('div', { class: 'status-banner status-banner-note', role: 'status' },
+        el('strong', { text: 'جارٍ تحميل حالة الموقع…' }));
+    }
+    if (item.error) {
+      return el('div', { class: 'status-banner status-banner-error', role: 'alert' },
+        el('strong', { text: 'تعذّر تحميل الحالة' }),
+        el('p', { text: item.error }));
+    }
+    if (item.notice) {
+      const kind = item.noticeKind === 'conflict'
+        ? 'status-banner-conflict'
+        : item.noticeKind === 'error'
+          ? 'status-banner-error'
+          : item.noticeKind === 'note'
+            ? 'status-banner-note'
+            : 'status-banner-success';
+      const role = item.noticeKind === 'error' || item.noticeKind === 'conflict' ? 'alert' : 'status';
+      return el('div', { class: `status-banner ${kind}`, role },
+        el('p', { text: item.notice }));
+    }
+    return null;
+  }
+
+  function stopSiteDialog() {
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (value) => {
+        if (settled) return;
+        settled = true;
+        resolve(value);
+      };
+      const input = el('textarea', {
+        class: 'input',
+        dir: 'rtl',
+        rows: '4',
+        maxlength: String(MAX_SITE_MESSAGE * 2),
+        placeholder: 'رسالة اختيارية تظهر للزائر أثناء التوقف',
+      });
+      const counter = el('p', { class: 'field-help', text: `0 / ${MAX_SITE_MESSAGE}` });
+      const warn = el('p', { class: 'field-warn', hidden: true, text: `الرسالة أطول من ${MAX_SITE_MESSAGE} حرفًا.` });
+      const tooLong = () => [...input.value].length > MAX_SITE_MESSAGE;
+      input.addEventListener('input', () => {
+        counter.textContent = `${[...input.value].length} / ${MAX_SITE_MESSAGE}`;
+        warn.hidden = !tooLong();
+      });
+      openModal({
+        title: 'إيقاف الموقع مؤقتًا',
+        body: el('div', { class: 'editor-form' },
+          el('p', { class: 'dialog-text', text: 'سيُوقف عرض الموقع للزائر فورًا بعد تأكيد الخادم. سيرى الزائر صفحة بسيطة تحمل الرسالة التالية إن كتبتها. يمكنك إعادة تشغيل الموقع لاحقًا من هذه الصفحة.' }),
+          el('label', { class: 'field' },
+            el('span', { class: 'field-label', text: 'رسالة الزائر (اختيارية)' }),
+            input,
+            counter,
+            warn)),
+        actions: [
+          {
+            label: 'إلغاء',
+            class: 'btn btn-ghost',
+            onClick(close) { done(null); close(); },
+          },
+          {
+            label: 'إيقاف الموقع',
+            class: 'btn btn-danger',
+            onClick(close) {
+              if (tooLong()) {
+                warn.hidden = false;
+                input.focus();
+                return;
+              }
+              done(input.value);
+              close();
+            },
+          },
+        ],
+        onClose() { done(null); },
+      });
+    });
+  }
+
+  async function sendSiteStatusRequest(request) {
+    // يُستدعى بعد إغلاق الحوار، لذا علامة الحوار لا تمنع الإرسال هنا؛ زر
+    // إعادة المحاولة وحده يتحقق من علامة الحوار قبل استدعائه.
+    if (!state.user || state.siteStatus.busy) return;
+    const pending = deepClone(request);
+    state.siteStatus.busy = true;
+    state.siteStatus.notice = state.siteStatus.pending
+      ? 'جارٍ إعادة إرسال الطلب المعلّق نفسه…'
+      : 'جارٍ تأكيد تغيير الحالة…';
+    state.siteStatus.noticeKind = 'note';
+    if (state.view === 'site-status') renderSiteStatusView();
+
+    try {
+      const result = await apiSend(`${API}/site-status`, {
+        state: pending.state,
+        message: pending.message,
+        expected_revision: pending.expected_revision,
+        operation_id: pending.operation_id,
+      });
+      const confirmed = normalizeSiteStatusWrite(result, pending.operation_id);
+      if (!confirmed) {
+        const error = new Error('invalid-response');
+        error.status = 502;
+        throw error;
+      }
+
+      // نتيجة الكتابة (بما فيها idempotent replay) سجل تاريخي فقط. الحالة
+      // الحالية تُجلب بقراءة جديدة قبل أي رسالة نجاح نهائية.
+      state.siteStatus.confirmed = {
+        ...confirmed,
+        requested_state: pending.state,
+        requested_message: pending.message,
+        expected_revision: pending.expected_revision,
+      };
+      state.siteStatus.notice = confirmed.idempotent
+        ? 'العملية مؤكدة سابقًا بنتيجة تاريخية. جارٍ جلب الحالة الحالية…'
+        : 'تم تأكيد العملية. جارٍ جلب الحالة الحالية…';
+      state.siteStatus.noticeKind = 'note';
+      if (state.view === 'site-status') renderSiteStatusView();
+
+      const fetched = await loadSiteStatus(true, { quiet: true });
+      if (!state.user) return;
+      state.siteStatus.error = '';
+      if (!fetched.ok || !fetched.applied) {
+        state.siteStatus.currentUnconfirmed = true;
+        state.siteStatus.notice = siteStatusUnconfirmedNotice(confirmed);
+        state.siteStatus.noticeKind = 'error';
+        return;
+      }
+
+      state.siteStatus.pending = null;
+      state.siteStatus.currentUnconfirmed = false;
+      state.siteStatus.notice = siteStatusCurrentNotice(pending, confirmed, fetched.value);
+      state.siteStatus.noticeKind = 'success';
+      if (fetched.value.state === pending.state) {
+        toast(fetched.value.state === 'stopped'
+          ? 'تم إيقاف الموقع مؤقتًا.'
+          : 'تمت إعادة تشغيل الموقع.', 'success');
+      }
+    } catch (error) {
+      if (error && error.status === 401) {
+        state.siteStatus.pending = null;
+        state.siteStatus.confirmed = null;
+        await endSession('انتهت الجلسة. سجّل الدخول مجددًا؛ لم تُؤكد حالة الموقع.');
+        return;
+      }
+      if (error && error.status === 403) {
+        state.siteStatus.pending = null;
+        state.siteStatus.confirmed = null;
+        state.siteStatus.notice = 'هذا الحساب لا يملك صلاحية تغيير حالة الموقع.';
+        state.siteStatus.noticeKind = 'error';
+      } else if (error && error.status === 409) {
+        state.siteStatus.pending = null;
+        state.siteStatus.confirmed = null;
+        state.siteStatus.notice = 'تعارض: تغيّرت حالة الموقع من جلسة أخرى. حُدّثت الحالة ولم يُنفَّذ التغيير.';
+        state.siteStatus.noticeKind = 'conflict';
+        await loadSiteStatus(true);
+      } else if (error && error.status === 422) {
+        state.siteStatus.pending = null;
+        state.siteStatus.confirmed = null;
+        state.siteStatus.notice = 'رفض الخادم طلب تغيير الحالة. راجع الرسالة ثم أعد المحاولة.';
+        state.siteStatus.noticeKind = 'error';
+      } else {
+        // الرد ضاع؛ العملية قد تكون نُفّذت. لا تُعرض نتيجة GET القديمة كحالة
+        // حالية، بل احتفظ بالطلب كاملًا لإعادة مقصودة واحدة بمعرّفها وبياناتها،
+        // من غير توليد عملية جديدة أو إعادة تلقائية. أخطاء الرفض الصريحة
+        // (401/403/409/422) لها فروعها ولا تُعتبر دليلًا على تنفيذ العملية.
+        state.siteStatus.currentUnconfirmed = true;
+        state.siteStatus.notice = siteStatusAmbiguousNotice();
+        state.siteStatus.noticeKind = 'error';
+      }
+    } finally {
+      state.siteStatus.busy = false;
+      if (state.user && state.view === 'site-status') renderSiteStatusView();
+    }
+  }
+
+  async function changeSiteStatus(target, message) {
+    if (operationBlocked()) return;
+    if (state.siteStatus.pending) {
+      toast('هناك طلب غير مؤكد بانتظار إعادة المحاولة. استخدم زر إعادة محاولة الطلب نفسه.', 'error');
+      return;
+    }
+    const status = state.siteStatus.value;
+    if (!status) {
+      toast('لم تُحمّل حالة الموقع بعد. أعد المحاولة.', 'error');
+      return;
+    }
+
+    let operationId;
+    try {
+      operationId = operationIdFor(
+        state.siteStatus,
+        JSON.stringify([target, message, status.revision]),
+        (id, signature) => ({
+          operation_id: id,
+          signature,
+          state: target,
+          message,
+          expected_revision: status.revision,
+        }),
+      );
+    } catch {
+      toast('تعذّر توليد معرّف العملية في هذا المتصفح.', 'error');
+      return;
+    }
+
+    await sendSiteStatusRequest({
+      operation_id: operationId,
+      state: target,
+      message,
+      expected_revision: status.revision,
+    });
+  }
+
+  async function retryPendingSiteStatus() {
+    if (!state.user || state.siteStatus.busy || state.siteStatus.dialogBusy) return;
+    const pending = deepClone(state.siteStatus.pending);
+    if (!pending || typeof pending.operation_id !== 'string'
+      || (pending.state !== 'running' && pending.state !== 'stopped')
+      || typeof pending.message !== 'string'
+      || !Number.isSafeInteger(pending.expected_revision)) return;
+    await sendSiteStatusRequest(pending);
+  }
+
+  async function onStopSite() {
+    if (operationBlocked()) return;
+    if (state.siteStatus.dialogBusy) {
+      toast('حوار تأكيد مفتوح بالفعل. أكمله أو ألغه قبل المتابعة.', 'error');
+      return;
+    }
+    state.siteStatus.dialogBusy = true;
+    if (state.view === 'site-status') renderSiteStatusView();
+    try {
+      const message = await stopSiteDialog();
+      if (message === null) return;
+      await changeSiteStatus('stopped', message);
+    } finally {
+      state.siteStatus.dialogBusy = false;
+      if (state.user && state.view === 'site-status') renderSiteStatusView();
+    }
+  }
+
+  async function onRestartSite() {
+    if (operationBlocked()) return;
+    if (state.siteStatus.dialogBusy) {
+      toast('حوار تأكيد مفتوح بالفعل. أكمله أو ألغه قبل المتابعة.', 'error');
+      return;
+    }
+    state.siteStatus.dialogBusy = true;
+    if (state.view === 'site-status') renderSiteStatusView();
+    try {
+      const confirmed = await confirmDialog({
+        title: 'إعادة تشغيل الموقع',
+        text: 'سيعود المحتوى المنشور الحالي للظهور للزائر. لا تُنشأ نسخة جديدة، ولن تُستعاد مسودة أو تُحذف.',
+        confirmLabel: 'إعادة التشغيل',
+      });
+      if (!confirmed) return;
+      await changeSiteStatus('running', '');
+    } finally {
+      state.siteStatus.dialogBusy = false;
+      if (state.user && state.view === 'site-status') renderSiteStatusView();
+    }
+  }
+
+  function renderSiteStatusView() {
+    const item = state.siteStatus;
+    const value = item.value;
+    const uncertain = item.currentUnconfirmed;
+    const known = Boolean(value) && !uncertain;
+    const stopped = known && value.state === 'stopped';
+    const label = uncertain ? 'غير مؤكد' : !value ? '—' : stopped ? 'متوقف مؤقتًا' : 'يعمل';
+    const badgeClass = uncertain || !value
+      ? 'badge status-pill status-conflict'
+      : stopped
+        ? 'badge status-pill status-conflict'
+        : 'badge status-pill status-saved';
+
+    const page = el('div', { class: 'readonly-page' });
+    const notice = siteStatusNotice();
+    if (notice) page.append(notice);
+
+    page.append(el('section', { class: 'card pad content-meta', 'aria-labelledby': 'site-status-title' },
+      el('h2', { id: 'site-status-title', text: 'حالة عرض الموقع' }),
+      el('p', { class: 'actions-note', text: 'تتحكم هذه الصفحة في عرض الموقع للزائر فقط. لا تغير المحتوى المنشور، والمسودات، وسجل النسخ، والوسائط، وحسابات المستخدمين.' }),
+      el('div', { class: 'site-state-row' },
+        el('span', { class: 'meta-label', text: 'الحالة الحالية' }),
+        el('span', { class: badgeClass, text: label })),
+      uncertain
+        ? el('p', { class: 'site-message', dir: 'rtl', text: 'تعذّر تأكيد الحالة الحالية بعد العملية؛ لا تُعرض نتيجة قديمة أو نتيجة العملية كحالة حالية.' })
+        : known
+          ? el('p', { class: 'site-message', dir: 'rtl', text: stopped && value.message ? value.message : 'لا توجد رسالة للزائر.' })
+          : null,
+      el('div', { class: 'meta-grid' },
+        metaRow('رقم المراجعة', known ? `#${value.revision}` : '—'),
+        metaRow('آخر تغيير', known ? formatDateTime(value.updated_at) : '—'),
+        metaRow('آخر من غيّر الحالة', known && value.changed_by.email ? value.changed_by.email : '—'))));
+
+    const blocked = item.loading || item.busy || item.dialogBusy || Boolean(item.pending);
+    page.append(el('section', { class: 'card pad site-status-actions', 'aria-labelledby': 'site-status-actions-title' },
+      el('h2', { id: 'site-status-actions-title', text: 'تغيير الحالة' }),
+      el('p', { class: 'actions-note', text: 'عند التوقف تُعرض للزائر صفحة بسيطة برمز 503 ورسالة اختيارية، ويبقى الدخول ولوحة التحكم والواجهات الإدارية والملفات العامة متاحة. رسالة الزائر نص عادي ولا تتجاوز 300 حرفًا. إعادة التشغيل تمسح الرسالة ولا تؤثر على أي إصدار محفوظ.' }),
+      el('div', { class: 'actions-row' },
+        el('button', {
+          class: 'btn btn-danger',
+          type: 'button',
+          disabled: blocked || !known || stopped,
+          onClick: onStopSite,
+        }, item.dialogBusy ? 'جارٍ التأكيد…' : item.busy && known && !stopped ? 'جارٍ الإيقاف…' : 'إيقاف الموقع مؤقتًا'),
+        el('button', {
+          class: 'btn btn-primary',
+          type: 'button',
+          disabled: blocked || !known || !stopped,
+          onClick: onRestartSite,
+        }, item.dialogBusy ? 'جارٍ التأكيد…' : item.busy && known && stopped ? 'جارٍ إعادة التشغيل…' : 'إعادة تشغيل الموقع'),
+        el('button', {
+          class: 'btn btn-ghost',
+          type: 'button',
+          disabled: item.loading || item.busy || item.dialogBusy,
+          onClick() { loadSiteStatus(true); },
+        }, item.loading ? 'جارٍ التحديث…' : 'تحديث الحالة'))));
+
+    if (item.pending) {
+      page.append(el('div', { class: 'banner-actions site-status-retry' },
+        el('p', {
+          class: 'group-hint',
+          text: `طلب غير مؤكد: ${siteStateLabel(item.pending.state)} · المراجعة المتوقعة #${item.pending.expected_revision}.`,
+        }),
+        el('button', {
+          class: 'btn btn-small btn-primary',
+          type: 'button',
+          disabled: item.busy || item.dialogBusy,
+          onClick: retryPendingSiteStatus,
+          'data-operation-id': item.pending.operation_id,
+          'data-state': item.pending.state,
+          'data-message': item.pending.message,
+          'data-expected-revision': String(item.pending.expected_revision),
+        }, 'إعادة محاولة الطلب نفسه')));
+    }
+
+    els.view.replaceChildren(page);
+  }
+
   function statusLabel() {
     switch (state.saveState) {
       case 'saving': return 'جارٍ الحفظ…';
@@ -2218,7 +2895,7 @@
     els['status-pill'].textContent = statusLabel();
     els['status-pill'].className = `badge status-pill status-${state.saveState}`;
 
-    const busyOp = state.publish.busy || state.restore.busy;
+    const busyOp = state.publish.busy || state.restore.busy || state.historyClear.busy;
     const save = els['save-btn'];
     if (save) {
       save.textContent = state.saveState === 'saving'
@@ -2238,7 +2915,9 @@
         ? 'جارٍ النشر…'
         : state.restore.busy
           ? 'جارٍ الاستعادة…'
-          : 'نشر المسودة';
+          : state.historyClear.busy
+            ? 'جارٍ حذف السجل…'
+            : 'نشر المسودة';
       publish.disabled = !state.user
         || busyOp
         || state.saving
@@ -2266,6 +2945,10 @@
 
   function verificationReason(detail, observed) {
     switch (detail) {
+      case 'site_stopped':
+        return 'الموقع متوقف مؤقتًا، لذا لا توجد صفحة محتوى يمكن التحقق منها. أعد الفحص بعد إعادة التشغيل.';
+      case 'site_state_unknown':
+        return 'تعذّر تأكيد حالة الموقع على الخادم؛ لم تُعتبر صفحة التوقف دليلًا على النشر.';
       case 'fallback_snapshot':
         return 'الصفحة العامة قدّمت نسخة fallback، وهي ليست تأكيدًا للنشر.';
       case 'not_live':
@@ -2844,10 +3527,21 @@
   function renderHistory() {
     const entries = state.history;
     const countText = `${entries.length} ${entries.length === 1 ? 'نسخة' : 'نسخ'}`;
+    const actionBusy = state.publish.busy || state.restore.busy || state.historyClear.busy;
 
     const head = el('div', { class: 'history-head' },
-      el('h2', { id: 'history-title', text: 'سجل النسخ المنشورة' }),
-      el('span', { class: 'history-count', text: countText }));
+      el('div', { class: 'history-head-title' },
+        el('h2', { id: 'history-title', text: 'سجل النسخ المنشورة' }),
+        el('span', { class: 'history-count', text: countText })),
+      el('button', {
+        class: 'btn btn-small btn-danger',
+        type: 'button',
+        disabled: actionBusy,
+        onClick(event) {
+          event.preventDefault();
+          onClearHistory();
+        },
+      }, state.historyClear.busy ? 'جارٍ حذف السجل…' : 'حذف سجل التعديلات نهائيًا'));
 
     let body;
     if (entries.length === 0) {
@@ -2856,7 +3550,7 @@
         el('span', { text: 'سيظهر هنا كل إصدار منشور عند توفره.' }));
     } else {
       const current = state.published ? state.published.version : null;
-      const busy = state.publish.busy || state.restore.busy;
+      const busy = actionBusy;
       const rows = entries.map((entry) => {
         const isCurrent = entry.version === current;
         return el('tr', { class: isCurrent ? 'row-current' : null },
@@ -2897,6 +3591,8 @@
         head,
         el('p', { class: 'group-hint' },
           'الاستعادة تنشئ إصدارًا جديدًا بمحتوى النسخة المختارة ولا تعيد ترقيم الإصدارات ولا تحذف أي نسخة. تُحفظ آخر 50 نسخة.'),
+        el('p', { class: 'group-hint' },
+          'حذف السجل يزيل نسخ سجل المحتوى الموجودة عند تنفيذ العملية فقط. لا يغيّر المحتوى المنشور الحالي أو رقمه أو المسودة أو الوسائط أو المستخدمين أو حالة الموقع وسجل عملياتها أو التحليلات. بعد الحذف لن تكون الاستعادة من اللوحة ممكنة للنسخ المحذوفة، وقد تبقى نسخ احتياطية سابقة خارج هذه اللوحة.'),
         body)));
   }
 
@@ -2980,12 +3676,13 @@
   function render() {
     updateNavigation();
     updateStatus();
-    if (!state.content) return;
+    if (!state.content && state.view !== 'site-status') return;
     if (EDITOR_VIEWS.has(state.view)) renderEditorView();
     else if (state.view === 'preview') renderPreviewView();
     else if (state.view === 'history') renderHistory();
     else if (state.view === 'media') renderMediaView();
     else if (state.view === 'stats') renderStatsView();
+    else if (state.view === 'site-status') renderSiteStatusView();
     else renderPublished();
   }
 
@@ -3003,6 +3700,7 @@
       loadMedia(false);
       loadTrash(false);
     }
+    if (state.view === 'site-status') loadSiteStatus(false);
     if (EDITOR_VIEWS.has(state.view)) loadMedia(false);
     if (focus) els.view.focus();
   }

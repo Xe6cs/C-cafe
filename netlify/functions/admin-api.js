@@ -1,11 +1,12 @@
 'use strict';
 // Admin API: read published content/history, read and save the single draft,
 // delete the draft, publish a draft revision, restore a history version, verify
-// the public preview page, and render a private preview of the draft.
+// the public preview page, render a private preview of the draft, and read or
+// change the temporary site display state.
 //
 // Scope:
-//   * GET/HEAD: bootstrap, history, preview, verify.
-//   * POST: draft save, draft delete, publish, restore.
+//   * GET/HEAD: bootstrap, history, preview, verify, site-status.
+//   * POST: draft save, draft delete, publish, restore, site-status.
 //   * No purge, upload, media, or analytics endpoint exists here.
 //
 // Security:
@@ -55,6 +56,8 @@ const TOKEN_RE = /^[A-Za-z0-9\-._~+/]+=*$/;
 // Both the main preview host and per-deploy hosts are accepted; nothing else is.
 const PREVIEW_HOST_RE = /^(?:[a-z0-9-]+--)?c-cafe-preview\.netlify\.app$/i;
 const VERSION_MARKER_RE = /<meta\s+name=["']ccafe-content-version["']\s+content=["']([^"']*)["']/i;
+const SITE_STATE_MARKER_RE = /<meta\s+name=["']ccafe-site-state["']\s+content=["']([^"']*)["']/i;
+const MAX_SITE_MESSAGE_CHARS = 300;
 
 const MEDIA_BUCKET = 'ccafe-media';
 const PUBLIC_MEDIA_BUCKET = 'ccafe-public';
@@ -70,7 +73,9 @@ const ROUTES = new Map([
   ['/api/admin/analytics/clear', ['POST']],
   ['/api/admin/bootstrap', ['GET', 'HEAD']],
   ['/api/admin/history', ['GET', 'HEAD']],
+  ['/api/admin/history/clear', ['POST']],
   ['/api/admin/preview', ['GET', 'HEAD']],
+  ['/api/admin/site-status', ['GET', 'HEAD', 'POST']],
   ['/api/admin/verify', ['GET', 'HEAD']],
   ['/api/admin/draft', ['POST']],
   ['/api/admin/draft/delete', ['POST']],
@@ -546,6 +551,92 @@ function rpcError(status, data) {
     return { ok: false, reason: 'invalid' };
   }
   return { ok: false, reason: 'upstream' };
+}
+
+// ---------------------------------------------------------------------------
+// Site display state
+//
+// The state tables are never read or written directly by this Function. Reads
+// and writes both go through SECURITY DEFINER RPCs that call assert_admin()
+// again. The RPC result is the only source of revision, time, and actor data.
+// ---------------------------------------------------------------------------
+
+function siteStatusValue(value) {
+  if (!isPlainObject(value)) return null;
+  if (value.state !== 'running' && value.state !== 'stopped') return null;
+  if (typeof value.message !== 'string'
+    || [...value.message].length > MAX_SITE_MESSAGE_CHARS) return null;
+  if (!Number.isSafeInteger(value.revision) || value.revision < 1) return null;
+  if (typeof value.updated_at !== 'string') return null;
+  if (!isPlainObject(value.changed_by)) return null;
+  if (value.changed_by.id !== null && typeof value.changed_by.id !== 'string') return null;
+  if (typeof value.changed_by.email !== 'string') return null;
+
+  return {
+    state: value.state,
+    message: value.message,
+    revision: value.revision,
+    updated_at: value.updated_at,
+    changed_by: {
+      id: value.changed_by.id,
+      email: value.changed_by.email,
+    },
+  };
+}
+
+function siteStatusWriteValue(value, operationId) {
+  const status = siteStatusValue(value);
+  if (!status) return null;
+  if (value.operation_id !== operationId) return null;
+  if (typeof value.idempotent !== 'boolean') return null;
+  return {
+    ...status,
+    operation_id: operationId,
+    idempotent: value.idempotent,
+  };
+}
+
+function parseSiteStatusBody(event) {
+  const body = bodyText(event);
+  if (!body.ok) return body;
+
+  let data;
+  try {
+    data = JSON.parse(body.value);
+  } catch {
+    return { ok: false, reason: 'invalid' };
+  }
+  if (!isPlainObject(data)) return { ok: false, reason: 'invalid' };
+  if (data.state !== 'running' && data.state !== 'stopped') return { ok: false, reason: 'invalid' };
+
+  const message = data.message === undefined || data.message === null ? '' : data.message;
+  if (typeof message !== 'string') return { ok: false, reason: 'invalid' };
+  if ([...message].length > MAX_SITE_MESSAGE_CHARS) return { ok: false, reason: 'invalid' };
+  if (data.state === 'running' && message !== '') return { ok: false, reason: 'invalid' };
+  if (!Number.isSafeInteger(data.expected_revision) || data.expected_revision < 1) {
+    return { ok: false, reason: 'invalid' };
+  }
+  if (typeof data.operation_id !== 'string' || !UUID_RE.test(data.operation_id)) {
+    return { ok: false, reason: 'invalid' };
+  }
+
+  return {
+    ok: true,
+    value: {
+      state: data.state,
+      message,
+      expected_revision: data.expected_revision,
+      operation_id: data.operation_id,
+    },
+  };
+}
+
+function siteStatusFailure(reason) {
+  if (reason === 'unauthorized') return jsonResponse(401, { error: 'unauthorized' });
+  if (reason === 'forbidden') return jsonResponse(403, { error: 'forbidden' });
+  if (reason === 'conflict') return jsonResponse(409, { error: 'conflict' });
+  if (reason === 'invalid') return jsonResponse(422, { error: 'invalid_request' });
+  return jsonResponse(502, { error: 'upstream_unavailable' });
 }
 
 // ---------------------------------------------------------------------------
@@ -1646,6 +1737,34 @@ function parseRestoreBody(event) {
   };
 }
 
+function parseHistoryClearBody(event) {
+  const body = bodyText(event);
+  if (!body.ok) return body;
+
+  let data;
+  try {
+    data = JSON.parse(body.value);
+  } catch {
+    return { ok: false, reason: 'invalid' };
+  }
+  if (!isPlainObject(data)) return { ok: false, reason: 'invalid' };
+
+  if (typeof data.operation_id !== 'string' || !UUID_RE.test(data.operation_id)) {
+    return { ok: false, reason: 'invalid' };
+  }
+  if (data.confirmation !== 'حذف السجل نهائيًا') {
+    return { ok: false, reason: 'invalid' };
+  }
+
+  return {
+    ok: true,
+    value: {
+      operation_id: data.operation_id,
+      confirmation: data.confirmation,
+    },
+  };
+}
+
 function parseMediaCreateBody(event) {
   const body = bodyText(event);
   if (!body.ok) return body;
@@ -1784,11 +1903,37 @@ async function readPublicVersion(origin) {
     return { ok: false, reason: 'fetch_failed' };
   }
 
+  const source = String(response.headers.get('x-ccafe-source') || '').trim().toLowerCase();
+
+  // A pause page is deliberately not a published-content page: it has no
+  // content-version marker at all. Detect the explicit state before reading a
+  // marker so a 503 can never be mistaken for a successful publish check.
+  if (response.status === 503) {
+    const headerState = String(response.headers.get('x-ccafe-site-state') || '').trim().toLowerCase();
+    let state = headerState === 'stopped' || headerState === 'unknown' ? headerState : '';
+    if (!state) {
+      try {
+        const body = await response.text();
+        const marker = SITE_STATE_MARKER_RE.exec(body);
+        const metaState = marker ? marker[1].trim().toLowerCase() : '';
+        if (metaState === 'stopped' || metaState === 'unknown') state = metaState;
+      } catch {
+        // The header is enough; an unreadable body is still not proof.
+      }
+    }
+    if (!state) state = 'unknown';
+    return {
+      ok: false,
+      reason: state === 'stopped' ? 'site_stopped' : 'site_state_unknown',
+      siteState: state,
+      source,
+    };
+  }
+
   if (response.status !== 200) {
     return { ok: false, reason: `http_${response.status}` };
   }
 
-  const source = String(response.headers.get('x-ccafe-source') || '').trim().toLowerCase();
   const headerVersion = String(response.headers.get('x-ccafe-version') || '').trim();
 
   let html;
@@ -1978,6 +2123,47 @@ async function handle(event) {
     return method === 'HEAD' ? jsonResponse(200) : jsonResponse(200, payload);
   }
 
+  if (pathname === '/api/admin/history/clear') {
+    const parsed = parseHistoryClearBody(event);
+    if (!parsed.ok) {
+      if (parsed.reason === 'too_large') return jsonResponse(413, { error: 'payload_too_large' });
+      return jsonResponse(400, { error: 'invalid_request' });
+    }
+
+    const result = await callRpc(config, token, 'admin_clear_content_history', {
+      p_operation_id: parsed.value.operation_id,
+      p_confirmation: parsed.value.confirmation,
+    });
+    if (!result.ok) {
+      if (result.reason === 'unauthorized') return jsonResponse(401, { error: 'unauthorized' });
+      if (result.reason === 'forbidden') return jsonResponse(403, { error: 'forbidden' });
+      if (result.reason === 'conflict') return jsonResponse(409, { error: 'conflict' });
+      if (result.reason === 'invalid') return jsonResponse(422, { error: 'invalid_request' });
+      return jsonResponse(502, { error: 'upstream_unavailable' });
+    }
+
+    const value = result.value;
+    if (!isPlainObject(value)
+      || value.operation_id !== parsed.value.operation_id
+      || !Number.isSafeInteger(value.deleted_count)
+      || value.deleted_count < 0
+      || (value.boundary_version !== null
+        && (!Number.isSafeInteger(value.boundary_version) || value.boundary_version < 1))
+      || (value.boundary_id !== null
+        && (!Number.isSafeInteger(value.boundary_id) || value.boundary_id < 1))
+      || typeof value.cleared_at !== 'string') {
+      return jsonResponse(502, { error: 'upstream_unavailable' });
+    }
+
+    return jsonResponse(200, {
+      operation_id: value.operation_id,
+      deleted_count: value.deleted_count,
+      boundary_version: value.boundary_version,
+      boundary_id: value.boundary_id,
+      cleared_at: value.cleared_at,
+    });
+  }
+
   if (pathname === '/api/admin/analytics') {
     const env = analyticsEnv();
     if (!env) return jsonResponse(503, { error: 'analytics_unavailable' });
@@ -2054,6 +2240,36 @@ async function handle(event) {
     });
   }
 
+  if (pathname === '/api/admin/site-status') {
+    if (method === 'POST') {
+      const parsed = parseSiteStatusBody(event);
+      if (!parsed.ok) {
+        if (parsed.reason === 'too_large') return jsonResponse(413, { error: 'payload_too_large' });
+        return jsonResponse(422, { error: 'invalid_request' });
+      }
+
+      const result = await callRpc(config, token, 'admin_set_site_status', {
+        p_state: parsed.value.state,
+        p_message: parsed.value.message,
+        p_expected_revision: parsed.value.expected_revision,
+        p_operation_id: parsed.value.operation_id,
+      });
+      if (!result.ok) return siteStatusFailure(result.reason);
+
+      const value = siteStatusWriteValue(result.value, parsed.value.operation_id);
+      if (!value) return jsonResponse(502, { error: 'upstream_unavailable' });
+      return jsonResponse(200, { ...value, server_time: new Date().toISOString() });
+    }
+
+    const result = await callRpc(config, token, 'admin_site_status', {});
+    if (!result.ok) return siteStatusFailure(result.reason);
+    const value = siteStatusValue(result.value);
+    if (!value) return jsonResponse(502, { error: 'upstream_unavailable' });
+    return method === 'HEAD'
+      ? jsonResponse(200)
+      : jsonResponse(200, { ...value, server_time: new Date().toISOString() });
+  }
+
   if (pathname === '/api/admin/verify') {
     const parsed = parseVerifyQuery(event);
     if (!parsed.ok) return jsonResponse(400, { error: 'invalid_request' });
@@ -2081,7 +2297,13 @@ async function handle(event) {
     let observedVersion = null;
 
     if (!observed.ok) {
-      state = 'error';
+      // A stopped or indeterminate public state is an explicit mismatch, not a
+      // verification error and never a published-content match. Retrying after
+      // a restart is the caller's decision; this request does not change state.
+      state = observed.reason === 'site_stopped'
+        || observed.reason === 'site_state_unknown'
+        ? 'mismatch'
+        : 'error';
       detail = observed.reason || 'fetch_failed';
     } else if (observed.reason) {
       state = 'mismatch';
@@ -2131,6 +2353,7 @@ async function handle(event) {
       version: parsed.value.version,
       observed_version: observedVersion,
       source: observed.source || null,
+      site_state: observed.siteState || null,
       detail: detail || null,
       checked_at: new Date().toISOString(),
     });
@@ -2934,9 +3157,13 @@ exports._internal = {
   parseDeleteBody,
   parsePublishBody,
   parseRestoreBody,
+  parseHistoryClearBody,
   parseMediaCreateBody,
   parseMediaIdBody,
   parseVerifyQuery,
+  parseSiteStatusBody,
+  siteStatusValue,
+  siteStatusWriteValue,
   verifyOrigin,
   readPublicVersion,
   callRpc,

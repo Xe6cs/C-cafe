@@ -10,6 +10,7 @@ const { handler, _internal } = require('../netlify/functions/admin-ui');
 const saved = {
   url: process.env.SUPABASE_URL,
   key: process.env.SUPABASE_ANON_KEY,
+  fetch: global.fetch,
 };
 
 function configure() {
@@ -22,6 +23,7 @@ function restore() {
     if (value === undefined) delete process.env[name];
     else process.env[name] = value;
   }
+  global.fetch = saved.fetch;
 }
 
 function event(pathname, method = 'GET') {
@@ -76,8 +78,37 @@ test('serves the admin HTML with a strict CSP and no caching', async () => {
       assert.match(result.body, /مكتبة الوسائط/);
       assert.match(result.body, /data-nav="stats"/);
       assert.match(result.body, /نشاط الزوار/);
+      assert.match(result.body, /data-nav="site-status"/);
+      assert.match(result.body, /حالة الموقع/);
       assert.doesNotMatch(result.body, /service_role/);
     }
+  } finally {
+    restore();
+  }
+});
+
+test('admin dashboard and assets never consult the public site-state route', async () => {
+  configure();
+  let called = false;
+  global.fetch = async () => {
+    called = true;
+    throw new Error('admin assets must load without a public site-state read');
+  };
+
+  try {
+    for (const pathname of [
+      '/admin/',
+      '/admin/app.js',
+      '/admin/editor.js',
+      '/admin/editor.css',
+      '/admin/config.js',
+      '/admin/vendor/supabase.js',
+    ]) {
+      const result = await handler(event(pathname));
+      assert.equal(result.statusCode, 200, pathname);
+      assertPrivateHeaders(result);
+    }
+    assert.equal(called, false);
   } finally {
     restore();
   }
@@ -102,8 +133,22 @@ test('admin scripts have the expected content types and security headers', async
     assert.match(app.body, /\$\{API\}\/publish/);
     assert.match(app.body, /\$\{API\}\/restore/);
     assert.match(app.body, /\$\{API\}\/verify/);
+    assert.match(app.body, /\$\{API\}\/site-status/);
+    assert.match(app.body, /MAX_SITE_MESSAGE = 300/);
+    assert.match(app.body, /site-state|site-status/);
+    assert.match(app.body, /status-banner-conflict/);
     assert.match(app.body, /beforeunload/);
     assert.match(app.body, /AUTOSAVE_MS/);
+    // Site status: write results are historical only, the current state comes
+    // from a fresh GET, stale reads are ignored, dialogs are guarded, and a
+    // lost response keeps the full request for an explicit in-memory retry.
+    assert.match(app.body, /const confirmed = normalizeSiteStatusWrite/);
+    assert.match(app.body, /const fetched = await loadSiteStatus\(true, \{ quiet: true \}\)/);
+    assert.match(app.body, /state\.siteStatus\.loadSeq/);
+    assert.match(app.body, /value\.revision >= current\.revision/);
+    assert.match(app.body, /state\.siteStatus\.dialogBusy = true/);
+    assert.match(app.body, /async function retryPendingSiteStatus/);
+    assert.match(app.body, /expected_revision: status\.revision/);
 
     // No persistent credentials and no direct write RPCs from the browser.
     // Publish/restore/verify must go through /api/admin only.
@@ -117,6 +162,8 @@ test('admin scripts have the expected content types and security headers', async
     assert.doesNotMatch(app.body, /admin_publish/);
     assert.doesNotMatch(app.body, /admin_restore/);
     assert.doesNotMatch(app.body, /admin_begin_public_check/);
+    assert.doesNotMatch(app.body, /admin_site_status/);
+    assert.doesNotMatch(app.body, /admin_set_site_status/);
     // Uploads go straight to the private bucket with the admin JWT; nothing else
     // in the browser touches the Storage API.
     assert.match(app.body, /\/storage\/v1\/object\/ccafe-media\//);
@@ -182,6 +229,12 @@ test('admin scripts have the expected content types and security headers', async
     assert.match(editorCss.body, /\.media-card-actions/);
     assert.match(editorCss.body, /\.media-confirm/);
     assert.match(editorCss.body, /\.media-trash-error/);
+    assert.match(editorCss.body, /\.site-state-row/);
+    assert.match(editorCss.body, /\.site-status-actions/);
+
+    const readonlyCss = await handler(event('/admin/readonly.css'));
+    assert.equal(readonlyCss.statusCode, 200);
+    assert.match(readonlyCss.body, /\.history-head-title/);
 
     const adminCss = await handler(event('/admin/admin.css'));
     assert.equal(adminCss.statusCode, 200);
